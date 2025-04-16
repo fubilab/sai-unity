@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -60,6 +61,10 @@ namespace SpectacularAI.DepthAI
         [SerializeField]
         public string AprilTagPath = "";
 
+        [Tooltip("Path to directory containing the map.bin and slam_config.json files.\n" +
+            "Note: sets useSlam=true")]
+        public string SlamDataPath = "";
+
         [Tooltip("Internal algorithm parameters")]
         public List<VioParameter> InternalParameters;
 
@@ -70,6 +75,22 @@ namespace SpectacularAI.DepthAI
         /// The current vio output.
         /// </summary>
         public static VioOutput Output { get; private set; }
+
+        public static SlamConfig SlamConfig { get; private set; }
+
+        private void Awake()
+        {
+            if (!String.IsNullOrEmpty(SlamDataPath)) {
+                try 
+                {
+                    SlamConfig = SlamConfig.ReadFromFile(SlamDataPath + "/slam_config.json");
+                } 
+                catch (Exception e)
+                {
+                    Debug.LogError($"Failed to read slam_config.json from ${SlamDataPath}\n{e.Message}");
+                }
+            }   
+        }
 
         private void OnEnable()
         {
@@ -84,6 +105,12 @@ namespace SpectacularAI.DepthAI
             config.RecordingOnly = RecordingOnly;
             config.RecordingFolder = RecordingFolder;
             config.AprilTagPath = AprilTagPath;
+
+            if (SlamConfig != null)
+            {
+                config.MapLoadPath = SlamDataPath + "/map.bin";
+            }
+            Debug.Log(config.MapLoadPath);
 
             _pipeline = new Pipeline(configuration: config, enableMappingAPI: MappingAPI, internalParameters: InternalParameters.ToArray());
             _session = _pipeline.StartSession();

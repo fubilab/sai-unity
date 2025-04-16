@@ -69,8 +69,18 @@ namespace SpectacularAI.DepthAI
             _prevSmoothedOrientation = UnityEngine.Quaternion.Slerp(_prevSmoothedOrientation, predictedOrientation, PoseSmoothAlpha);
 
             // Pose w.r.t to Origin (after last reset)
-            transform.position = _origin.rotation * _prevSmoothedPosition + _origin.GetPosition();
-            transform.rotation = _origin.rotation * _prevSmoothedOrientation;
+            Vector3 nextPosition = _origin.rotation * _prevSmoothedPosition + _origin.GetPosition();
+            UnityEngine.Quaternion nextRotation = _origin.rotation * _prevSmoothedOrientation;
+
+            if (Vio.SlamConfig != null)
+            {
+                Matrix4x4 nextMatrix = Vio.SlamConfig.SlamWorldToUnityWorldMatrix * Matrix4x4.TRS(nextPosition, nextRotation, Vector3.one);
+                transform.SetPositionAndRotation(nextMatrix.GetPosition(), nextMatrix.rotation);
+            }
+            else 
+            {
+                transform.SetPositionAndRotation(nextPosition, nextRotation);
+            }
         }
 
         private Matrix4x4 GetPositionAndYaw(Matrix4x4 pose)

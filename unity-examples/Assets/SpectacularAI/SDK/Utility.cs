@@ -37,6 +37,15 @@ namespace SpectacularAI
             );
         }
 
+        public static Matrix4x4 TransformWorldToWorldMatrixToUnity(Matrix4d worldToWorld)
+        {
+            // sai_world->unity_world = sai_world->world1->world2->unity_world
+            //                        = sai_world->unity_world * world1->world2 * unity_world->sai_world
+            return SPECTACULAR_AI_WORLD_TO_UNITY_WORLD * 
+                worldToWorld.ToUnity() * 
+                SPECTACULAR_AI_WORLD_TO_UNITY_WORLD; // this matrix is its own inverse
+        }
+
         public static Matrix4x4 TransformCameraToWorldMatrixToUnity(Matrix4d cameraToWorld)
         {
             // unity_camera->unity_world = unity_camera->sai_camera->sai_world->unity_world
