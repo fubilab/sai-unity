@@ -1,6 +1,8 @@
-# April Tag with SLAM instructions
+# April Tag with SLAM relocalization
 
-This example demonstrates using an April Tag to align a saved SLAM map with a digital twin of the mapped environment in Unity. 
+This example demonstrates using an April Tag to align a saved SLAM map with a digital twin of the mapped environment in Unity.
+
+Note that relocalization is still an experimental feature of the SDK. The system has trouble relocalizing from arbitrary positions in the map. Therefore, we recommend relocalizing by repeating the first part of your recording path (see step 10).
 
 ## Instructions
 
@@ -31,3 +33,7 @@ This example demonstrates using an April Tag to align a saved SLAM map with a di
     This will find the alignment between the SLAM world and the Unity world using the April Tag pose data as an anchor point. It saves the alignment as a transform matrix, in a file named `slam_config.json` that it saves in the recording directory you passed as an argument to the script.  
 
 8. Place the PATH_TO_RECORDING_DIR (or whatever you used as an argument in step 7) into the "Slam Data Path" field of the inspector of the VIO prefab in the Unity scene.  
+
+9. Remove the April Tag from your environment.
+
+10. Press Play in Unity and slowly repeat the same movements that you made at the beginning of your recording path. If everything workd, the system should relocalize within a few seconds.
