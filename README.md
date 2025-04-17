@@ -30,6 +30,7 @@ See [Luxonis documentation](https://docs.luxonis.com/hardware/platform/deploy/us
     * **[MappingVisu](https://github.com/SpectacularAI/unity-wrapper/tree/main/unity-examples/Assets/SpectacularAI/Examples/MappingVisu)** SLAM example. Build and visualize 3D point cloud of the environment in real-time using OAK-D device.
     * **[Record](https://github.com/SpectacularAI/unity-wrapper/tree/main/unity-examples/Assets/SpectacularAI/Examples/Record)** Recording tool. Enables recording datasets with OAK-D device for Replay API. Note: requires FFmpeg https://spectacularai.github.io/docs/sdk/index.html#ffmpeg.
     * **[AprilTag](https://github.com/SpectacularAI/unity-wrapper/tree/main/unity-examples/Assets/SpectacularAI/Examples/AprilTag)** April Tag integration example. Place April Tags using Unity Editor. The April Tags are then input to the SDK enabling absolute positioning.
+    * **[AprilTagWithSLAM](https://github.com/SpectacularAI/unity-wrapper/tree/main/unity-examples/Assets/SpectacularAI/Examples/AprilTag/README.md)** Example showing how to use an April Tag to align SLAM relocalization with a digital twin of the environment.
     * **[HelloReplay](https://github.com/SpectacularAI/unity-wrapper/tree/main/unity-examples/Assets/SpectacularAI/Examples/HelloReplay)** Minimal Replay API example. Shows how to use the Replay API in Unity to replay your recordings.
 
 ### Quick links
