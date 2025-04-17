@@ -5,7 +5,10 @@ This example demonstrates using an April Tag to align a saved SLAM map with a di
 ## Instructions
 
 1. Print and place an April Tag somewhere in your environment. You can use an [online generator](https://chaitanyantr.github.io/apriltag.html) to create the tag.
-2. Record a walk around the room using the [Recording](https://spectacularai.github.io/docs/sdk/recording.html). You need to enable the SLAM map export, so run it as `sai-cli record oak --map` or `sai-record-realsense --map`.
+2. Record a walk around the room using the [Recording](https://spectacularai.github.io/docs/sdk/recording.html). You need to enable the SLAM map export, so run it as 
+```bash
+sai-cli record oak --map
+```
 3. Process the recording into a mesh using the command line tool. Replace PATH_TO_DATA with the directory created in the previous step.
 ```bash
 sai-cli process PATH_TO_DATA mesh.obj --preview3d --texturize
