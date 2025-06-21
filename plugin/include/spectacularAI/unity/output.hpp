@@ -53,4 +53,15 @@ extern "C" {
         int width,
         int height);
     EXPORT_API void sai_camera_release(const CameraWrapper* cameraHandle);
+
+    /** Orientation API */
+    EXPORT_API void sai_set_reprojection_orientation(double x, double y, double z, double w);
+    EXPORT_API void UNITY_INTERFACE_API sai_on_render_event(int eventID);
+
+    /** New Orientation API */
+    EXPORT_API void sai_set_rendered_orientation(double x, double y, double z, double w);
+    EXPORT_API void sai_set_vio_output_handle(VioOutputWrapper* vioOutputHandle, int cameraId);
+    EXPORT_API void sai_start_reprojection_thread(int targetFps);
+    EXPORT_API void sai_stop_reprojection_thread();
+    EXPORT_API void sai_set_rendered_texture(uint32_t textureId);
 }
