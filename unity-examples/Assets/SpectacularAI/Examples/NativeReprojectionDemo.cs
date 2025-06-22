@@ -45,6 +45,33 @@ public class NativeReprojectionDemo : MonoBehaviour
   private UnityEngine.Camera _camera;
   private RenderTexture _offscreenRT;
 
+  // Permutation struct for axis order and sign
+  private struct Permutation
+  {
+    public int[] order; // e.g. [0,1,2] for x,y,z
+    public int[] sign;  // e.g. [1,-1,1] for x,-y,z
+    public string name;
+    public Permutation(int[] o, int[] s, string n) { order = o; sign = s; name = n; }
+  }
+  private static readonly Permutation[] Permutations = new Permutation[] {
+    new Permutation(new[]{0,1,2}, new[]{1,1,1}, "x,y,z"),
+    new Permutation(new[]{0,2,1}, new[]{1,1,1}, "x,z,y"),
+    new Permutation(new[]{1,0,2}, new[]{1,1,1}, "y,x,z"),
+    new Permutation(new[]{1,2,0}, new[]{1,1,1}, "y,z,x"),
+    new Permutation(new[]{2,0,1}, new[]{1,1,1}, "z,x,y"),
+    new Permutation(new[]{2,1,0}, new[]{1,1,1}, "z,y,x"),
+    // All with sign flips
+    new Permutation(new[]{0,1,2}, new[]{-1,1,1}, "-x,y,z"),
+    new Permutation(new[]{0,1,2}, new[]{1,-1,1}, "x,-y,z"),
+    new Permutation(new[]{0,1,2}, new[]{1,1,-1}, "x,y,-z"),
+    new Permutation(new[]{0,1,2}, new[]{-1,-1,1}, "-x,-y,z"),
+    new Permutation(new[]{0,1,2}, new[]{-1,1,-1}, "-x,y,-z"),
+    new Permutation(new[]{0,1,2}, new[]{1,-1,-1}, "x,-y,-z"),
+    new Permutation(new[]{0,1,2}, new[]{-1,-1,-1}, "-x,-y,-z"),
+    // Add more as needed
+  };
+  private int _permIndex = 0;
+
   void Awake()
   {
     _camera = GetComponent<UnityEngine.Camera>();
@@ -112,13 +139,28 @@ public class NativeReprojectionDemo : MonoBehaviour
     }
   }
 
+  void Update()
+  {
+    if (Input.GetKeyDown(KeyCode.Space))
+    {
+      _permIndex = (_permIndex + 1) % Permutations.Length;
+      Debug.Log($"[NativeReprojectionDemo] Permutation changed to {_permIndex}: {Permutations[_permIndex].name}");
+    }
+  }
+
   void LateUpdate()
   {
     // Update pose for timewarp
-    var poseProvider = FindObjectOfType<PoseProvider>();
-    if (poseProvider == null) return;
-    var orientationUnity = Utility.TransformCameraToWorldQuaternionToSpectacularAI(transform.rotation);
-    NativeReprojection.sai_set_rendered_orientation(
-        orientationUnity.x, orientationUnity.y, orientationUnity.z, orientationUnity.w);
+    var unityQuat = Vio.Output.Pose._orientation;
+    // var eulerUnity = unityQuat.eulerAngles;
+    // // Apply permutation to euler angles
+    // var perm = Permutations[_permIndex];
+    // float[] e = { eulerUnity.x, eulerUnity.y, eulerUnity.z };
+    // float[] pe = new float[3];
+    // for (int i = 0; i < 3; ++i) pe[i] = e[perm.order[i]] * perm.sign[i];
+    // Debug.Log($"[NativeReprojectionDemo] Unity Euler sent to plugin (perm {perm.name}): {pe[0]:F3}, {pe[1]:F3}, {pe[2]:F3}");
+    // // Optionally, convert back to quaternion and send to plugin
+    // var permQuat = UnityEngine.Quaternion.Euler(pe[0], pe[1], pe[2]);
+    NativeReprojection.sai_set_rendered_orientation(unityQuat.x, unityQuat.y, unityQuat.z, unityQuat.w);
   }
 }

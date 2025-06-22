@@ -326,6 +326,10 @@ static void UNITY_INTERFACE_API OnRenderEvent(int eventId) {
         r_z = g_orientation_rendered[2];
         r_w = g_orientation_rendered[3];
     }
+
+    // std::cout << "[SAI Reprojection] Rendered orientation (from Unity): "
+    //           << r_x << ", " << r_y << ", " << r_z << ", " << r_w << std::endl;
+
     // Get latest orientation from VIO output
     std::shared_ptr<const spectacularAI::VioOutput> localVioOutput;
     int localCameraId;
@@ -335,7 +339,7 @@ static void UNITY_INTERFACE_API OnRenderEvent(int eventId) {
         localCameraId = g_cameraId;
     }
 
-    double l_x = 0, l_y = 0, l_z = 0, l_w = 1;
+    double l_x = r_x, l_y = r_y, l_z = r_z, l_w = r_w; // Default to no change
     if (localVioOutput) {
         VioOutputWrapper tempWrapper(localVioOutput);
         spectacularAI::CameraPose* cameraPose = sai_vio_output_get_camera_pose(&tempWrapper, localCameraId);
@@ -348,6 +352,10 @@ static void UNITY_INTERFACE_API OnRenderEvent(int eventId) {
             sai_camera_pose_release(cameraPose);
         }
     }
+
+    // std::cout << "[SAI Reprojection] Latest orientation (from VIO): "
+    //           << l_x << ", " << l_y << ", " << l_z << ", " << l_w << std::endl;
+
     // Compute delta = latest * inverse(rendered)
     double inv_r_x = -r_x, inv_r_y = -r_y, inv_r_z = -r_z, inv_r_w = r_w;
     double d_x = l_w * inv_r_x + l_x * inv_r_w + l_y * inv_r_z - l_z * inv_r_y;
@@ -356,6 +364,12 @@ static void UNITY_INTERFACE_API OnRenderEvent(int eventId) {
     double d_w = l_w * inv_r_w - l_x * inv_r_x - l_y * inv_r_y - l_z * inv_r_z;
     double norm = sqrt(d_x*d_x + d_y*d_y + d_z*d_z + d_w*d_w);
     d_x /= norm; d_y /= norm; d_z /= norm; d_w /= norm;
+
+    // We want to apply the inverse rotation to the quad, to counteract camera motion
+    d_x = -d_x;
+    d_y = -d_y;
+    d_z = -d_z;
+
     float xx = d_x * d_x;
     float yy = d_y * d_y;
     float zz = d_z * d_z;
@@ -384,7 +398,7 @@ static void UNITY_INTERFACE_API OnRenderEvent(int eventId) {
     rot[15] = 1.0f;
     // Modern OpenGL Core profile rendering
     glUseProgram(gShader);
-    glUniformMatrix4fv(gMVPUniform, 1, GL_FALSE, rot);
+    glUniformMatrix4fv(gMVPUniform, 1, GL_TRUE, rot);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, texId);
     glUniform1i(gTexUniform, 0);
