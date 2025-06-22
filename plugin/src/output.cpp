@@ -317,6 +317,9 @@ static void UNITY_INTERFACE_API OnRenderEvent(int eventId) {
         std::cerr << "[OnRenderEvent] Texture has invalid size (" << width << ", " << height << "), skipping render." << std::endl;
         return;
     }
+
+    const float aspect = (height > 0) ? (float)width / (float)height : 1.0f;
+
     glViewport(0, 0, width, height);
     GLenum err = glGetError();
     if (err != GL_NO_ERROR) {
@@ -409,12 +412,12 @@ static void UNITY_INTERFACE_API OnRenderEvent(int eventId) {
     float cosRoll = cos(rollAngle);
     float sinRoll = sin(rollAngle);
 
-    // Column-major matrix for OpenGL
+    // Column-major matrix for OpenGL, corrected for aspect ratio
     float finalMVP[16] = {
-        cosRoll,  sinRoll, 0.0f, 0.0f,
-       -sinRoll,  cosRoll, 0.0f, 0.0f,
-        0.0f,     0.0f,    1.0f, 0.0f,
-        translateX, translateY, 0.0f, 1.0f
+        cosRoll,          sinRoll * aspect, 0.0f, 0.0f,
+       -sinRoll / aspect, cosRoll,          0.0f, 0.0f,
+        0.0f,             0.0f,             1.0f, 0.0f,
+        translateX,       translateY,       0.0f, 1.0f
     };
     
     // Debug output occasionally
