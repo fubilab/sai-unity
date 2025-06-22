@@ -36,6 +36,9 @@ public static class NativeReprojection
       return _renderEventFuncPtr;
     }
   }
+
+  [DllImport(ApiConstants.saiNativeApi, CallingConvention = ApiConstants.saiCallingConvention)]
+  public static extern void sai_set_rendered_depth(float depth);
 }
 
 public class NativeReprojectionDemo : MonoBehaviour
@@ -44,33 +47,6 @@ public class NativeReprojectionDemo : MonoBehaviour
   public int TargetFps = 60;
   private UnityEngine.Camera _camera;
   private RenderTexture _offscreenRT;
-
-  // Permutation struct for axis order and sign
-  private struct Permutation
-  {
-    public int[] order; // e.g. [0,1,2] for x,y,z
-    public int[] sign;  // e.g. [1,-1,1] for x,-y,z
-    public string name;
-    public Permutation(int[] o, int[] s, string n) { order = o; sign = s; name = n; }
-  }
-  private static readonly Permutation[] Permutations = new Permutation[] {
-    new Permutation(new[]{0,1,2}, new[]{1,1,1}, "x,y,z"),
-    new Permutation(new[]{0,2,1}, new[]{1,1,1}, "x,z,y"),
-    new Permutation(new[]{1,0,2}, new[]{1,1,1}, "y,x,z"),
-    new Permutation(new[]{1,2,0}, new[]{1,1,1}, "y,z,x"),
-    new Permutation(new[]{2,0,1}, new[]{1,1,1}, "z,x,y"),
-    new Permutation(new[]{2,1,0}, new[]{1,1,1}, "z,y,x"),
-    // All with sign flips
-    new Permutation(new[]{0,1,2}, new[]{-1,1,1}, "-x,y,z"),
-    new Permutation(new[]{0,1,2}, new[]{1,-1,1}, "x,-y,z"),
-    new Permutation(new[]{0,1,2}, new[]{1,1,-1}, "x,y,-z"),
-    new Permutation(new[]{0,1,2}, new[]{-1,-1,1}, "-x,-y,z"),
-    new Permutation(new[]{0,1,2}, new[]{-1,1,-1}, "-x,y,-z"),
-    new Permutation(new[]{0,1,2}, new[]{1,-1,-1}, "x,-y,-z"),
-    new Permutation(new[]{0,1,2}, new[]{-1,-1,-1}, "-x,-y,-z"),
-    // Add more as needed
-  };
-  private int _permIndex = 0;
 
   void Awake()
   {
@@ -139,13 +115,13 @@ public class NativeReprojectionDemo : MonoBehaviour
     }
   }
 
+  private float _lastDepth = 1.0f; // Default fallback depth
+
   void Update()
   {
-    if (Input.GetKeyDown(KeyCode.Space))
-    {
-      _permIndex = (_permIndex + 1) % Permutations.Length;
-      Debug.Log($"[NativeReprojectionDemo] Permutation changed to {_permIndex}: {Permutations[_permIndex].name}");
-    }
+    // Example: set _lastDepth to a fixed value for now (replace with real depth sampling if available)
+    _lastDepth = 1.0f; // TODO: Replace with actual min depth sampling
+    NativeReprojection.sai_set_rendered_depth(_lastDepth);
   }
 
   void LateUpdate()

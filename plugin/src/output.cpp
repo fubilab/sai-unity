@@ -11,6 +11,7 @@
 #include <vector>
 #include <iostream>
 #include <Unity/IUnityGraphics.h>
+#include <Eigen/Geometry>
 
 spectacularAI::TrackingStatus sai_vio_output_get_tracking_status(const VioOutputWrapper* vioOutputHandle) {
     assert(vioOutputHandle);
@@ -153,6 +154,7 @@ static int g_cameraId{0};
 static std::mutex g_orientationMutex;
 static std::atomic<uint32_t> g_renderedTextureId{0};
 static std::atomic<double> g_orientation_rendered[4];
+static std::atomic<float> g_renderedDepth{1.0f};
 
 struct OrientationInit {
     OrientationInit() {
@@ -370,6 +372,7 @@ static void UNITY_INTERFACE_API OnRenderEvent(int eventId) {
     d_y = -d_y;
     d_z = -d_z;
 
+    // --- Build rotation matrix from delta quaternion ---
     float xx = d_x * d_x;
     float yy = d_y * d_y;
     float zz = d_z * d_z;
@@ -396,9 +399,26 @@ static void UNITY_INTERFACE_API OnRenderEvent(int eventId) {
     rot[13] = 0.0f;
     rot[14] = 0.0f;
     rot[15] = 1.0f;
-    // Modern OpenGL Core profile rendering
+
+    // --- Eigen-based quad shift ---
+    float depth = g_renderedDepth.load();
+    Eigen::Vector3f center(0, 0, depth);
+    Eigen::Quaternionf dq((float)d_w, (float)d_x, (float)d_y, (float)d_z);
+    Eigen::Vector3f shifted = dq * center;
+    Eigen::Vector3f offset = shifted - center;
+    float trans[16] = {
+        1, 0, 0, offset.x(),
+        0, 1, 0, offset.y(),
+        0, 0, 1, offset.z(),
+        0, 0, 0, 1
+    };
+    float finalMVP[16] = {0};
+    for (int row = 0; row < 4; ++row)
+        for (int col = 0; col < 4; ++col)
+            for (int k = 0; k < 4; ++k)
+                finalMVP[row + col*4] += trans[row + k*4] * rot[k + col*4];
     glUseProgram(gShader);
-    glUniformMatrix4fv(gMVPUniform, 1, GL_TRUE, rot);
+    glUniformMatrix4fv(gMVPUniform, 1, GL_TRUE, finalMVP);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, texId);
     glUniform1i(gTexUniform, 0);
@@ -435,6 +455,10 @@ EXPORT_API void sai_set_vio_output_handle(VioOutputWrapper* vioOutputHandle, int
 
 EXPORT_API void sai_set_rendered_texture(uint32_t textureId) {
     g_renderedTextureId = textureId;
+}
+
+EXPORT_API void sai_set_rendered_depth(float depth) {
+    g_renderedDepth = depth;
 }
 
 // Plugin event for orientation reprojection
