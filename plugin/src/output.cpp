@@ -394,8 +394,8 @@ static void UNITY_INTERFACE_API OnRenderEvent(int eventId) {
     // --- Convert Delta Quaternion to Euler Angles ---
     // This provides a more stable representation of rotation than raw components.
     const double yaw_angle   = atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz));
-    const double pitch_angle = asin(2.0 * (qw * qy - qz * qx));
-    const double roll_angle_rad  = atan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx * qx + qy * qy));
+    const double pitch_angle = -asin(2.0 * (qw * qy - qz * qx));
+    const double roll_angle_rad  = -atan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx * qx + qy * qy));
 
     // --- Apply transformations based on Euler angles ---
     float depth = g_renderedDepth.load();
@@ -403,7 +403,7 @@ static void UNITY_INTERFACE_API OnRenderEvent(int eventId) {
     // Apply inverse transformations. Parallax effect for translation is scaled by depth.
     float translateX = -yaw_angle * depth * 1.5f;   // Yaw -> X translation
     float translateY = -pitch_angle * depth * 1.5f; // Pitch -> Y translation
-    float rollAngle  = -roll_angle_rad;             // Roll -> 2D rotation of the quad (not depth dependent)
+    float rollAngle  = -roll_angle_rad * 1.5f;             // Roll -> 2D rotation of the quad (not depth dependent)
 
     // Create a transformation matrix with translation and roll rotation
     float cosRoll = cos(rollAngle);
