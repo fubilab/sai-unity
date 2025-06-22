@@ -391,48 +391,39 @@ static void UNITY_INTERFACE_API OnRenderEvent(int eventId) {
 
     // Don't modify the projection matrix - use it as-is from Unity
 
-    // --- Simplified Approach: Direct Translation Without Projection Matrix ---
+    // --- Convert Delta Quaternion to Euler Angles ---
+    // This provides a more stable representation of rotation than raw components.
+    const double yaw_angle   = atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz));
+    const double pitch_angle = asin(2.0 * (qw * qy - qz * qx));
+    const double roll_angle_rad  = atan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx * qx + qy * qy));
+
+    // --- Apply transformations based on Euler angles ---
     float depth = g_renderedDepth.load();
-    
-    // Extract rotation components from the quaternion
-    // For latency compensation, we need to apply the inverse of each rotation:
-    // - Pitch (qx) → inverse vertical translation (translateY)
-    // - Yaw (qy) → inverse horizontal translation (translateX) 
-    // - Roll (qz) → inverse roll translation (translateZ)
-    
-    // Convert quaternion components directly to translation offsets
-    // All translations are inverted to compensate for the latency
-    float pitch = (float)qx;  // Pitch component from quaternion
-    float yaw = (float)qy;    // Yaw component from quaternion  
-    float roll = (float)qz;   // Roll component from quaternion
-    
-    // Apply inverse transformations scaled by depth for parallax effect
-    // FINAL MAPPING confirmed by testing:
-    // - Pitch movement → qy component → Y translation (vertical)
-    // - Yaw movement → qz component → X translation (horizontal)  
-    // - Roll movement → qx component → Z translation (depth)
-    float translateX = -(float)qz * depth * 0.5f;    // qz (yaw) -> X (horizontal)
-    float translateY = -(float)qy * depth * 0.5f;    // qy (pitch) -> Y (vertical)  
-    float translateZ = -(float)qx * depth * 0.5f;    // qx (roll) -> Z (depth)
-    
-    // Create a translation matrix in column-major order (OpenGL standard)
-    // Matrix layout: [0 4 8 12]  where [12, 13, 14] are translation components
-    //                [1 5 9 13]
-    //                [2 6 10 14]
-    //                [3 7 11 15]
+
+    // Apply inverse transformations. Parallax effect for translation is scaled by depth.
+    float translateX = -yaw_angle * depth * 1.5f;   // Yaw -> X translation
+    float translateY = -pitch_angle * depth * 1.5f; // Pitch -> Y translation
+    float rollAngle  = -roll_angle_rad;             // Roll -> 2D rotation of the quad (not depth dependent)
+
+    // Create a transformation matrix with translation and roll rotation
+    float cosRoll = cos(rollAngle);
+    float sinRoll = sin(rollAngle);
+
+    // Column-major matrix for OpenGL
     float finalMVP[16] = {
-        1.0f, 0.0f, 0.0f, 0.0f,        // Column 0: [0,1,2,3]
-        0.0f, 1.0f, 0.0f, 0.0f,        // Column 1: [4,5,6,7]
-        0.0f, 0.0f, 1.0f, 0.0f,        // Column 2: [8,9,10,11]
-        translateX, translateY, translateZ, 1.0f  // Column 3: [12,13,14,15] - translation
+        cosRoll,  sinRoll, 0.0f, 0.0f,
+       -sinRoll,  cosRoll, 0.0f, 0.0f,
+        0.0f,     0.0f,    1.0f, 0.0f,
+        translateX, translateY, 0.0f, 1.0f
     };
     
     // Debug output occasionally
     static int debugCounter = 0;
-    if (++debugCounter % 60 == 0) { // Every ~60 frames
-        std::cout << "[Debug] depth=" << depth << " qx=" << qx << " qy=" << qy << " qz=" << qz << std::endl;
-        std::cout << "[Debug] translateX=" << translateX << " translateY=" << translateY << " translateZ=" << translateZ << std::endl;
-        std::cout << "[Debug] Matrix[12,13,14]=" << finalMVP[12] << "," << finalMVP[13] << "," << finalMVP[14] << std::endl;
+    if (++debugCounter % 30 == 0) { // Every ~30 frames
+        std::cout << "[Reproject] Euler (deg): Yaw=" << (yaw_angle * 180.0/3.14159)
+                  << ", Pitch=" << (pitch_angle * 180.0/3.14159)
+                  << ", Roll=" << (roll_angle_rad * 180.0/3.14159) << std::endl;
+        std::cout << "[Reproject] Transform: X=" << translateX << " Y=" << translateY << " Roll=" << (rollAngle * 180.0f / 3.14159265f) << " deg" << std::endl;
     }
 
     // Modern OpenGL Core profile rendering
