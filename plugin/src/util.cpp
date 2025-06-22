@@ -29,3 +29,20 @@ spectacularAI::Pose sai_pose_from_matrix(double t, Matrix4dWrapper localToWorld)
         t, 
         reinterpret_cast<spectacularAI::Matrix4d&>(localToWorld));
 }
+
+spectacularAI::Matrix3d wrapper_to_matrix(const Matrix3dWrapper &w) {
+    spectacularAI::Matrix3d m;
+    m[0][0] = w.m00; m[0][1] = w.m01; m[0][2] = w.m02;
+    m[1][0] = w.m10; m[1][1] = w.m11; m[1][2] = w.m12;
+    m[2][0] = w.m20; m[2][1] = w.m21; m[2][2] = w.m22;
+    return m;
+}
+
+spectacularAI::Matrix4d wrapper_to_matrix(const Matrix4dWrapper &w) {
+    spectacularAI::Matrix4d m;
+    m[0][0] = w.m00; m[0][1] = w.m01; m[0][2] = w.m02; m[0][3] = w.m03;
+    m[1][0] = w.m10; m[1][1] = w.m11; m[1][2] = w.m12; m[1][3] = w.m13;
+    m[2][0] = w.m20; m[2][1] = w.m21; m[2][2] = w.m22; m[2][3] = w.m23;
+    m[3][0] = w.m30; m[3][1] = w.m31; m[3][2] = w.m32; m[3][3] = w.m33;
+    return m;
+}

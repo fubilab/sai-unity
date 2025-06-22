@@ -21,6 +21,9 @@ public static class NativeReprojection
 
   [DllImport("SpectacularAIPlugin")]
   public static extern void sai_set_rendered_texture(uint textureId);
+
+  [DllImport("SpectacularAIPlugin")]
+  public static extern void sai_reprojection_plugin_event(int eventId);
 }
 
 public class NativeReprojectionDemo : MonoBehaviour
@@ -60,6 +63,13 @@ public class NativeReprojectionDemo : MonoBehaviour
     var texPtr = target.GetNativeTexturePtr();
     if (texPtr != IntPtr.Zero)
       NativeReprojection.sai_set_rendered_texture((uint)texPtr.ToInt64());
+
+    // Issue the plugin event to trigger reprojection on the render thread
+    GL.IssuePluginEvent(
+      Marshal.GetFunctionPointerForDelegate(
+        (Action<int>)NativeReprojection.sai_reprojection_plugin_event),
+      0 // eventId, not used in plugin
+    );
   }
 
   void Start()
@@ -102,9 +112,7 @@ public class NativeReprojectionDemo : MonoBehaviour
     // Get the current orientation in SAI coordinates
     var poseProvider = FindObjectOfType<PoseProvider>();
     if (poseProvider == null) return;
-    var orientationUnity = poseProvider.transform.rotation;
-    // Convert Unity quaternion to SAI (assume user provides conversion if needed)
-    // For this demo, assume same coordinate system
+    var orientationUnity = TransformCameraToWorldQuaternionToSpectacularAI(poseProvider.transform.rotation);
     NativeReprojection.sai_set_rendered_orientation(
         orientationUnity.x, orientationUnity.y, orientationUnity.z, orientationUnity.w);
   }

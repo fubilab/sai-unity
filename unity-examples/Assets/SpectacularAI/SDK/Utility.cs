@@ -63,6 +63,16 @@ namespace SpectacularAI
                 UNITY_CAMERA_TO_SPECTACULAR_AI_CAMERA).rotation;
         }
 
+        public static UnityEngine.Quaternion TransformCameraToWorldQuaternionToSpectacularAI(UnityEngine.Quaternion unityCameraToWorld)
+        {
+            // Must use rotation matrices because of left->right handed flip (quaternions do not support it).
+            // Inverse of the Unity->SAI transform used in TransformCameraToWorldQuaternionToUnity
+            var m = UNITY_CAMERA_TO_SPECTACULAR_AI_CAMERA *
+                    Matrix4x4.Rotate(unityCameraToWorld) *
+                    SPECTACULAR_AI_WORLD_TO_UNITY_WORLD;
+            return m.rotation;
+        }
+
         public static Vector3 TransformCameraPointToUnity(Vector3f point)
         {
             return new Vector3(point.x, -point.y, point.z);

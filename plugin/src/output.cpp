@@ -2,7 +2,6 @@
 #include "../include/spectacularAI/unity/util.hpp"
 
 #include <cassert>
-#include <thread>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -139,15 +138,16 @@ void sai_camera_release(const CameraWrapper* cameraHandle) {
 #include <GL/gl.h>
 #endif
 
-static std::atomic<double> g_orientation_rendered[4] = {1.0, 0.0, 0.0, 0.0};
+// Remove threading, keep global VioOutputWrapper* and texture/orientation state
 static std::atomic<VioOutputWrapper*> g_vioOutputHandle{nullptr};
 static std::atomic<int> g_cameraId{0};
-static std::atomic<bool> g_reprojectionThreadRunning{false};
-static std::thread g_reprojectionThread;
 static std::mutex g_orientationMutex;
 static std::atomic<uint32_t> g_renderedTextureId{0};
+static std::atomic<double> g_orientation_rendered[4] = {1.0, 0.0, 0.0, 0.0};
 
-void sai_set_rendered_orientation(double x, double y, double z, double w) {
+extern "C" {
+
+EXPORT_API void sai_set_rendered_orientation(double x, double y, double z, double w) {
     std::lock_guard<std::mutex> lock(g_orientationMutex);
     g_orientation_rendered[0] = x;
     g_orientation_rendered[1] = y;
@@ -155,133 +155,101 @@ void sai_set_rendered_orientation(double x, double y, double z, double w) {
     g_orientation_rendered[3] = w;
 }
 
-void sai_set_vio_output_handle(VioOutputWrapper* vioOutputHandle, int cameraId) {
+EXPORT_API void sai_set_vio_output_handle(VioOutputWrapper* vioOutputHandle, int cameraId) {
     g_vioOutputHandle = vioOutputHandle;
     g_cameraId = cameraId;
-}
-
-void sai_stop_reprojection_thread() {
-    g_reprojectionThreadRunning = false;
-    if (g_reprojectionThread.joinable()) {
-        g_reprojectionThread.join();
-    }
-}
-
-void reprojection_thread_func(int targetFps) {
-    g_reprojectionThreadRunning = true;
-    const double frameInterval = 1.0 / targetFps;
-    while (g_reprojectionThreadRunning) {
-        auto start = std::chrono::high_resolution_clock::now();
-        // Get rendered orientation
-        double r_x, r_y, r_z, r_w;
-        {
-            std::lock_guard<std::mutex> lock(g_orientationMutex);
-            r_x = g_orientation_rendered[0];
-            r_y = g_orientation_rendered[1];
-            r_z = g_orientation_rendered[2];
-            r_w = g_orientation_rendered[3];
-        }
-        // Get latest orientation from VIO output
-        VioOutputWrapper* vioOutput = g_vioOutputHandle.load();
-        int cameraId = g_cameraId.load();
-        double l_x = 0, l_y = 0, l_z = 0, l_w = 1;
-        if (vioOutput) {
-            spectacularAI::CameraPose* cameraPose = sai_vio_output_get_camera_pose(vioOutput, cameraId);
-            if (cameraPose) {
-                spectacularAI::Quaternion q = cameraPose->pose.orientation;
-                l_x = q.x;
-                l_y = q.y;
-                l_z = q.z;
-                l_w = q.w;
-                sai_camera_pose_release(cameraPose);
-            }
-        }
-        // Compute delta = latest * inverse(rendered)
-        double inv_r_x = -r_x, inv_r_y = -r_y, inv_r_z = -r_z, inv_r_w = r_w;
-        double d_x = l_w * inv_r_x + l_x * inv_r_w + l_y * inv_r_z - l_z * inv_r_y;
-        double d_y = l_w * inv_r_y - l_x * inv_r_z + l_y * inv_r_w + l_z * inv_r_x;
-        double d_z = l_w * inv_r_z + l_x * inv_r_y - l_y * inv_r_x + l_z * inv_r_w;
-        double d_w = l_w * inv_r_w - l_x * inv_r_x - l_y * inv_r_y - l_z * inv_r_z;
-        double norm = sqrt(d_x*d_x + d_y*d_y + d_z*d_z + d_w*d_w);
-        d_x /= norm; d_y /= norm; d_z /= norm; d_w /= norm;
-        float xx = d_x * d_x;
-        float yy = d_y * d_y;
-        float zz = d_z * d_z;
-        float xy = d_x * d_y;
-        float xz = d_x * d_z;
-        float yz = d_y * d_z;
-        float wx = d_w * d_x;
-        float wy = d_w * d_y;
-        float wz = d_w * d_z;
-        float rot[16];
-        rot[0] = 1.0f - 2.0f * (yy + zz);
-        rot[1] = 2.0f * (xy - wz);
-        rot[2] = 2.0f * (xz + wy);
-        rot[3] = 0.0f;
-        rot[4] = 2.0f * (xy + wz);
-        rot[5] = 1.0f - 2.0f * (xx + zz);
-        rot[6] = 2.0f * (yz - wx);
-        rot[7] = 0.0f;
-        rot[8] = 2.0f * (xz - wy);
-        rot[9] = 2.0f * (yz + wx);
-        rot[10] = 1.0f - 2.0f * (xx + yy);
-        rot[11] = 0.0f;
-        rot[12] = 0.0f;
-        rot[13] = 0.0f;
-        rot[14] = 0.0f;
-        rot[15] = 1.0f;
-        // OpenGL output (same as before)
-        glPushAttrib(GL_ALL_ATTRIB_BITS);
-        glPushMatrix();
-        glMatrixMode(GL_MODELVIEW);
-        glLoadMatrixf(rot);
-        glMatrixMode(GL_PROJECTION);
-        glPushMatrix();
-        glLoadIdentity();
-        glOrtho(-1, 1, -1, 1, -1, 1);
-        glEnable(GL_TEXTURE_2D);
-        glBindTexture(GL_TEXTURE_2D, g_renderedTextureId.load());
-        glBegin(GL_QUADS);
-        glTexCoord2f(0, 0); glVertex2f(-1, -1);
-        glTexCoord2f(1, 0); glVertex2f(1, -1);
-        glTexCoord2f(1, 1); glVertex2f(1, 1);
-        glTexCoord2f(0, 1); glVertex2f(-1, 1);
-        glEnd();
-        glPopMatrix();
-        glMatrixMode(GL_MODELVIEW);
-        glPopMatrix();
-        glPopAttrib();
-        // Sleep to maintain target framerate
-        auto end = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double> elapsed = end - start;
-        double sleepTime = frameInterval - elapsed.count();
-        if (sleepTime > 0) {
-            std::this_thread::sleep_for(std::chrono::duration<double>(sleepTime));
-        }
-    }
-}
-
-extern "C" {
-
-EXPORT_API void sai_set_rendered_orientation(double x, double y, double z, double w) {
-    sai_set_rendered_orientation(x, y, z, w);
-}
-
-EXPORT_API void sai_set_vio_output_handle(VioOutputWrapper* vioOutputHandle, int cameraId) {
-    sai_set_vio_output_handle(vioOutputHandle, cameraId);
 }
 
 EXPORT_API void sai_set_rendered_texture(uint32_t textureId) {
     g_renderedTextureId = textureId;
 }
 
-EXPORT_API void sai_start_reprojection_thread(int targetFps) {
-    sai_stop_reprojection_thread();
-    g_reprojectionThread = std::thread(reprojection_thread_func, targetFps);
-}
-
-EXPORT_API void sai_stop_reprojection_thread() {
-    sai_stop_reprojection_thread();
+// Plugin event for orientation reprojection
+EXPORT_API void UNITY_INTERFACE_API sai_reprojection_plugin_event(int eventId) {
+    // Get rendered orientation
+    double r_x, r_y, r_z, r_w;
+    {
+        std::lock_guard<std::mutex> lock(g_orientationMutex);
+        r_x = g_orientation_rendered[0];
+        r_y = g_orientation_rendered[1];
+        r_z = g_orientation_rendered[2];
+        r_w = g_orientation_rendered[3];
+    }
+    // Get latest orientation from VIO output
+    VioOutputWrapper* vioOutput = g_vioOutputHandle.load();
+    int cameraId = g_cameraId.load();
+    double l_x = 0, l_y = 0, l_z = 0, l_w = 1;
+    if (vioOutput) {
+        spectacularAI::CameraPose* cameraPose = sai_vio_output_get_camera_pose(vioOutput, cameraId);
+        if (cameraPose) {
+            spectacularAI::Quaternion q = cameraPose->pose.orientation;
+            l_x = q.x;
+            l_y = q.y;
+            l_z = q.z;
+            l_w = q.w;
+            sai_camera_pose_release(cameraPose);
+        }
+    }
+    // Compute delta = latest * inverse(rendered)
+    double inv_r_x = -r_x, inv_r_y = -r_y, inv_r_z = -r_z, inv_r_w = r_w;
+    double d_x = l_w * inv_r_x + l_x * inv_r_w + l_y * inv_r_z - l_z * inv_r_y;
+    double d_y = l_w * inv_r_y - l_x * inv_r_z + l_y * inv_r_w + l_z * inv_r_x;
+    double d_z = l_w * inv_r_z + l_x * inv_r_y - l_y * inv_r_x + l_z * inv_r_w;
+    double d_w = l_w * inv_r_w - l_x * inv_r_x - l_y * inv_r_y - l_z * inv_r_z;
+    double norm = sqrt(d_x*d_x + d_y*d_y + d_z*d_z + d_w*d_w);
+    d_x /= norm; d_y /= norm; d_z /= norm; d_w /= norm;
+    float xx = d_x * d_x;
+    float yy = d_y * d_y;
+    float zz = d_z * d_z;
+    float xy = d_x * d_y;
+    float xz = d_x * d_z;
+    float yz = d_y * d_z;
+    float wx = d_w * d_x;
+    float wy = d_w * d_y;
+    float wz = d_w * d_z;
+    float rot[16];
+    rot[0] = 1.0f - 2.0f * (yy + zz);
+    rot[1] = 2.0f * (xy - wz);
+    rot[2] = 2.0f * (xz + wy);
+    rot[3] = 0.0f;
+    rot[4] = 2.0f * (xy + wz);
+    rot[5] = 1.0f - 2.0f * (xx + zz);
+    rot[6] = 2.0f * (yz - wx);
+    rot[7] = 0.0f;
+    rot[8] = 2.0f * (xz - wy);
+    rot[9] = 2.0f * (yz + wx);
+    rot[10] = 1.0f - 2.0f * (xx + yy);
+    rot[11] = 0.0f;
+    rot[12] = 0.0f;
+    rot[13] = 0.0f;
+    rot[14] = 0.0f;
+    rot[15] = 1.0f;
+    // OpenGL output (Unity context is current)
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
+    glPushMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadMatrixf(rot);
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glOrtho(-1, 1, -1, 1, -1, 1);
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, g_renderedTextureId.load());
+    glBegin(GL_QUADS);
+    glTexCoord2f(0, 0); glVertex2f(-1, -1);
+    glTexCoord2f(1, 0); glVertex2f(1, -1);
+    glTexCoord2f(1, 1); glVertex2f(1, 1);
+    glTexCoord2f(0, 1); glVertex2f(-1, 1);
+    glEnd();
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    glPopMatrix();
+    glPopAttrib();
 }
 
 } // extern "C"
+
+// All state is set via atomic globals from C# before issuing the plugin event.
+// No need for event IDs if only one action is performed per event.
+// Thread safety is ensured by std::atomic and std::mutex for orientation.
+// The plugin event reads the latest state set by C#.

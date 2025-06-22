@@ -64,4 +64,5 @@ extern "C" {
     EXPORT_API void sai_start_reprojection_thread(int targetFps);
     EXPORT_API void sai_stop_reprojection_thread();
     EXPORT_API void sai_set_rendered_texture(uint32_t textureId);
+    EXPORT_API void UNITY_INTERFACE_API sai_reprojection_plugin_event(int eventId);
 }
