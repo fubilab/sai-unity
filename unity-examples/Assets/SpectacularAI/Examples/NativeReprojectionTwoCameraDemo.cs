@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 using UnityEngine;
+using SpectacularAI;
 using SpectacularAI.DepthAI;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
@@ -11,15 +12,15 @@ public class NativeReprojectionTwoCameraDemo : MonoBehaviour
   public int MainCameraFps = 30;
   public int DisplayCameraFps = 60;
   private bool _started = false;
-  private Camera _mainCamera;
-  private Camera _displayCamera;
+  private UnityEngine.Camera _mainCamera;
+  private UnityEngine.Camera _displayCamera;
   private RenderTexture _offscreenRT;
   private float _mainCameraTimer = 0f;
   private float _mainCameraInterval;
 
   void Awake()
   {
-    var cameras = GetComponentsInChildren<Camera>();
+    var cameras = GetComponentsInChildren<UnityEngine.Camera>();
     if (cameras.Length < 2)
     {
       Debug.LogError("NativeReprojectionTwoCameraDemo: Please add two child cameras (main and display)");
@@ -38,8 +39,6 @@ public class NativeReprojectionTwoCameraDemo : MonoBehaviour
   void OnDisable()
   {
     RenderPipelineManager.endCameraRendering -= OnEndCameraRendering;
-    if (_started)
-      NativeReprojection.sai_stop_reprojection_thread();
   }
 
   void Start()
@@ -56,22 +55,14 @@ public class NativeReprojectionTwoCameraDemo : MonoBehaviour
       _displayCamera.targetTexture = null; // Display camera renders to screen
     }
     // Get VIO output handle from DepthAI session
-    var vio = FindObjectOfType<VioOutputProvider>();
-    if (vio == null)
-    {
-      Debug.LogError("No VioOutputProvider found in scene");
-      return;
-    }
+    var vio = Vio.Output;
     IntPtr vioHandle = vio.GetNativeHandle();
     NativeReprojection.sai_set_vio_output_handle(vioHandle, CameraId);
-    NativeReprojection.sai_start_reprojection_thread(DisplayCameraFps);
     _started = true;
   }
 
   void OnDestroy()
   {
-    if (_started)
-      NativeReprojection.sai_stop_reprojection_thread();
     if (_offscreenRT != null)
     {
       if (_mainCamera != null && _mainCamera.targetTexture == _offscreenRT)
@@ -98,7 +89,7 @@ public class NativeReprojectionTwoCameraDemo : MonoBehaviour
         orientationUnity.x, orientationUnity.y, orientationUnity.z, orientationUnity.w);
   }
 
-  void OnEndCameraRendering(ScriptableRenderContext ctx, Camera cam)
+  void OnEndCameraRendering(ScriptableRenderContext ctx, UnityEngine.Camera cam)
   {
     // Only trigger plugin event for the display camera
     var texPtr = _offscreenRT.GetNativeTexturePtr();

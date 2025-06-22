@@ -1,5 +1,6 @@
 #pragma once
 
+#include <Unity/IUnityInterface.h>
 #include <memory>
 #include <spectacularAI/output.hpp>
 #include <spectacularAI/types.hpp>
@@ -56,13 +57,11 @@ extern "C" {
 
     /** Orientation API */
     EXPORT_API void sai_set_reprojection_orientation(double x, double y, double z, double w);
-    EXPORT_API void UNITY_INTERFACE_API sai_on_render_event(int eventID);
+    EXPORT_API UNITY_INTERFACE_API void sai_on_render_event(int eventID);
 
     /** New Orientation API */
     EXPORT_API void sai_set_rendered_orientation(double x, double y, double z, double w);
     EXPORT_API void sai_set_vio_output_handle(VioOutputWrapper* vioOutputHandle, int cameraId);
-    EXPORT_API void sai_start_reprojection_thread(int targetFps);
-    EXPORT_API void sai_stop_reprojection_thread();
     EXPORT_API void sai_set_rendered_texture(uint32_t textureId);
-    EXPORT_API void UNITY_INTERFACE_API sai_reprojection_plugin_event(int eventId);
+    EXPORT_API UNITY_INTERFACE_API void sai_reprojection_plugin_event(int eventId);
 }

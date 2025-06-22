@@ -5,6 +5,12 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <mutex>
+#include <cmath>
+#include <string>
+#include <vector>
+#include <iostream>
+#include <Unity/IUnityGraphics.h>
 
 spectacularAI::TrackingStatus sai_vio_output_get_tracking_status(const VioOutputWrapper* vioOutputHandle) {
     assert(vioOutputHandle);
@@ -132,40 +138,185 @@ void sai_camera_release(const CameraWrapper* cameraHandle) {
     if (cameraHandle) delete cameraHandle;
 }
 
+#include <GL/glew.h>
 #ifdef __APPLE__
 #include <OpenGL/gl3.h>
 #else
 #include <GL/gl.h>
 #endif
+#include <iostream>
 
 // Remove threading, keep global VioOutputWrapper* and texture/orientation state
-static std::atomic<VioOutputWrapper*> g_vioOutputHandle{nullptr};
-static std::atomic<int> g_cameraId{0};
+static std::mutex g_vioOutputMutex;
+static std::shared_ptr<const spectacularAI::VioOutput> g_vioOutput;
+static int g_cameraId{0};
 static std::mutex g_orientationMutex;
 static std::atomic<uint32_t> g_renderedTextureId{0};
-static std::atomic<double> g_orientation_rendered[4] = {1.0, 0.0, 0.0, 0.0};
+static std::atomic<double> g_orientation_rendered[4];
 
-extern "C" {
+struct OrientationInit {
+    OrientationInit() {
+        g_orientation_rendered[0] = 1.0;
+        g_orientation_rendered[1] = 0.0;
+        g_orientation_rendered[2] = 0.0;
+        g_orientation_rendered[3] = 0.0;
+    }
+};
+static OrientationInit orientationInit;
 
-EXPORT_API void sai_set_rendered_orientation(double x, double y, double z, double w) {
-    std::lock_guard<std::mutex> lock(g_orientationMutex);
-    g_orientation_rendered[0] = x;
-    g_orientation_rendered[1] = y;
-    g_orientation_rendered[2] = z;
-    g_orientation_rendered[3] = w;
+// --- Modern OpenGL Core profile quad rendering ---
+namespace {
+GLuint gQuadVAO = 0, gQuadVBO = 0, gShader = 0;
+GLint gMVPUniform = -1, gTexUniform = -1;
+
+const char* quadVert = R"(
+#version 330 core
+layout(location = 0) in vec2 aPos;
+layout(location = 1) in vec2 aUV;
+uniform mat4 uMVP;
+out vec2 vUV;
+void main() {
+    vUV = aUV;
+    gl_Position = uMVP * vec4(aPos, 0.0, 1.0);
+}
+)";
+
+const char* quadFrag = R"(
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+uniform sampler2D uTex;
+void main() {
+    FragColor = texture(uTex, vUV);
+}
+)";
+
+GLuint compileShader(GLenum type, const char* src) {
+    GLuint s = glCreateShader(type);
+    glShaderSource(s, 1, &src, nullptr);
+    glCompileShader(s);
+    GLint ok = 0;
+    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[512];
+        glGetShaderInfoLog(s, 512, nullptr, log);
+        std::cerr << "Shader compile error: " << log << std::endl;
+    }
+    return s;
 }
 
-EXPORT_API void sai_set_vio_output_handle(VioOutputWrapper* vioOutputHandle, int cameraId) {
-    g_vioOutputHandle = vioOutputHandle;
-    g_cameraId = cameraId;
+GLuint createShaderProgram(const char* vs, const char* fs) {
+    GLuint v = compileShader(GL_VERTEX_SHADER, vs);
+    GLuint f = compileShader(GL_FRAGMENT_SHADER, fs);
+    GLuint prog = glCreateProgram();
+    glAttachShader(prog, v);
+    glAttachShader(prog, f);
+    glLinkProgram(prog);
+    glDeleteShader(v);
+    glDeleteShader(f);
+    GLint ok = 0;
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[512];
+        glGetProgramInfoLog(prog, 512, nullptr, log);
+        std::cerr << "Program link error: " << log << std::endl;
+    }
+    return prog;
 }
 
-EXPORT_API void sai_set_rendered_texture(uint32_t textureId) {
-    g_renderedTextureId = textureId;
+void ensureQuadResources() {
+    static bool glewInitialized = false;
+    if (!glewInitialized) {
+        GLenum err = glewInit();
+        if (err != GLEW_OK) {
+            std::cerr << "GLEW init error: " << glewGetErrorString(err) << std::endl;
+        }
+        glewInitialized = true;
+    }
+    if (gQuadVAO) return;
+    float quadVerts[] = {
+        // pos      // uv
+        -1, -1,     0, 0,
+         1, -1,     1, 0,
+        -1,  1,     0, 1,
+         1,  1,     1, 1
+    };
+    glGenVertexArrays(1, &gQuadVAO);
+    glGenBuffers(1, &gQuadVBO);
+    glBindVertexArray(gQuadVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, gQuadVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVerts), quadVerts, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    gShader = createShaderProgram(quadVert, quadFrag);
+    gMVPUniform = glGetUniformLocation(gShader, "uMVP");
+    gTexUniform = glGetUniformLocation(gShader, "uTex");
+}
+}
+// --- End modern OpenGL helpers ---
+
+static IUnityInterfaces* s_UnityInterfaces = nullptr;
+static IUnityGraphics* s_UnityGraphics = nullptr;
+
+// Forward declaration for the GL render callback
+static void UNITY_INTERFACE_API OnRenderEvent(int eventId);
+
+extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+UnityPluginLoad(IUnityInterfaces* unityInterfaces) {
+    s_UnityInterfaces = unityInterfaces;
+    s_UnityGraphics = s_UnityInterfaces->Get<IUnityGraphics>();
+    if (s_UnityGraphics) {
+        s_UnityGraphics->RegisterDeviceEventCallback([](UnityGfxDeviceEventType eventType) {
+            if (eventType == kUnityGfxDeviceEventInitialize) {
+                s_UnityGraphics = s_UnityInterfaces->Get<IUnityGraphics>();
+            } else if (eventType == kUnityGfxDeviceEventShutdown) {
+                s_UnityGraphics = nullptr;
+            }
+        });
+    }
 }
 
-// Plugin event for orientation reprojection
-EXPORT_API void UNITY_INTERFACE_API sai_reprojection_plugin_event(int eventId) {
+extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+UnityPluginUnload() {
+    // Nothing to clean up
+}
+
+// The GL render callback (all OpenGL code goes here)
+static void UNITY_INTERFACE_API OnRenderEvent(int eventId) {
+    if (!s_UnityGraphics) return;
+
+    ensureQuadResources();
+
+    // Bind default framebuffer to ensure drawing to Unity's backbuffer
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    uint32_t texId = g_renderedTextureId.load();
+    if (texId == 0) {
+        std::cerr << "[OnRenderEvent] No valid texture ID set, skipping render." << std::endl;
+        return;
+    }
+    if (!glIsTexture(texId)) {
+        std::cerr << "[OnRenderEvent] Texture ID " << texId << " is not a valid GL texture, skipping render." << std::endl;
+        return;
+    }
+    int width = 0, height = 0;
+    glBindTexture(GL_TEXTURE_2D, texId);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    if (width <= 0 || height <= 0) {
+        std::cerr << "[OnRenderEvent] Texture has invalid size (" << width << ", " << height << "), skipping render." << std::endl;
+        return;
+    }
+    glViewport(0, 0, width, height);
+    GLenum err = glGetError();
+    if (err != GL_NO_ERROR) {
+        std::cerr << "[OnRenderEvent] OpenGL error before rendering: 0x" << std::hex << err << std::dec << std::endl;
+        return;
+    }
     // Get rendered orientation
     double r_x, r_y, r_z, r_w;
     {
@@ -176,11 +327,18 @@ EXPORT_API void UNITY_INTERFACE_API sai_reprojection_plugin_event(int eventId) {
         r_w = g_orientation_rendered[3];
     }
     // Get latest orientation from VIO output
-    VioOutputWrapper* vioOutput = g_vioOutputHandle.load();
-    int cameraId = g_cameraId.load();
+    std::shared_ptr<const spectacularAI::VioOutput> localVioOutput;
+    int localCameraId;
+    {
+        std::lock_guard<std::mutex> lock(g_vioOutputMutex);
+        localVioOutput = g_vioOutput;
+        localCameraId = g_cameraId;
+    }
+
     double l_x = 0, l_y = 0, l_z = 0, l_w = 1;
-    if (vioOutput) {
-        spectacularAI::CameraPose* cameraPose = sai_vio_output_get_camera_pose(vioOutput, cameraId);
+    if (localVioOutput) {
+        VioOutputWrapper tempWrapper(localVioOutput);
+        spectacularAI::CameraPose* cameraPose = sai_vio_output_get_camera_pose(&tempWrapper, localCameraId);
         if (cameraPose) {
             spectacularAI::Quaternion q = cameraPose->pose.orientation;
             l_x = q.x;
@@ -224,27 +382,54 @@ EXPORT_API void UNITY_INTERFACE_API sai_reprojection_plugin_event(int eventId) {
     rot[13] = 0.0f;
     rot[14] = 0.0f;
     rot[15] = 1.0f;
-    // OpenGL output (Unity context is current)
-    glPushAttrib(GL_ALL_ATTRIB_BITS);
-    glPushMatrix();
-    glMatrixMode(GL_MODELVIEW);
-    glLoadMatrixf(rot);
-    glMatrixMode(GL_PROJECTION);
-    glPushMatrix();
-    glLoadIdentity();
-    glOrtho(-1, 1, -1, 1, -1, 1);
-    glEnable(GL_TEXTURE_2D);
-    glBindTexture(GL_TEXTURE_2D, g_renderedTextureId.load());
-    glBegin(GL_QUADS);
-    glTexCoord2f(0, 0); glVertex2f(-1, -1);
-    glTexCoord2f(1, 0); glVertex2f(1, -1);
-    glTexCoord2f(1, 1); glVertex2f(1, 1);
-    glTexCoord2f(0, 1); glVertex2f(-1, 1);
-    glEnd();
-    glPopMatrix();
-    glMatrixMode(GL_MODELVIEW);
-    glPopMatrix();
-    glPopAttrib();
+    // Modern OpenGL Core profile rendering
+    glUseProgram(gShader);
+    glUniformMatrix4fv(gMVPUniform, 1, GL_FALSE, rot);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, texId);
+    glUniform1i(gTexUniform, 0);
+    glBindVertexArray(gQuadVAO);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glBindVertexArray(0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(0);
+    err = glGetError();
+    if (err != GL_NO_ERROR) {
+        std::cerr << "[OnRenderEvent] OpenGL error after rendering: 0x" << std::hex << err << std::dec << std::endl;
+    }
+}
+
+extern "C" {
+
+EXPORT_API void sai_set_rendered_orientation(double x, double y, double z, double w) {
+    std::lock_guard<std::mutex> lock(g_orientationMutex);
+    g_orientation_rendered[0] = x;
+    g_orientation_rendered[1] = y;
+    g_orientation_rendered[2] = z;
+    g_orientation_rendered[3] = w;
+}
+
+EXPORT_API void sai_set_vio_output_handle(VioOutputWrapper* vioOutputHandle, int cameraId) {
+    std::lock_guard<std::mutex> lock(g_vioOutputMutex);
+    if (vioOutputHandle) {
+        g_vioOutput = vioOutputHandle->getHandle();
+    } else {
+        g_vioOutput.reset();
+    }
+    g_cameraId = cameraId;
+}
+
+EXPORT_API void sai_set_rendered_texture(uint32_t textureId) {
+    g_renderedTextureId = textureId;
+}
+
+// Plugin event for orientation reprojection
+EXPORT_API void* GetRenderEventFunc() {
+    return (void*)OnRenderEvent;
+}
+
+EXPORT_API void sai_reprojection_plugin_event(int eventId) {
+    // Deprecated: do nothing, C# should use GL.IssuePluginEvent(GetRenderEventFunc(), eventId)
 }
 
 } // extern "C"

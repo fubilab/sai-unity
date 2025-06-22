@@ -11,6 +11,8 @@ endif()
 
 find_package(depthai REQUIRED)
 find_package(spectacularAI_depthaiPlugin REQUIRED)
+find_package(OpenGL REQUIRED)
+find_package(GLEW REQUIRED)
 
 set(PLUGIN_SRC
   src/replay.cpp
@@ -31,7 +33,8 @@ if(MSVC)
 endif()
 
 add_library(${CMAKE_PROJECT_NAME} SHARED ${PLUGIN_SRC})
-target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE ${PLUGIN_LIBS})
+target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/include/Unity)
+target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE ${PLUGIN_LIBS} OpenGL::GL GLEW::GLEW)
 
 # enables searching for dynamic libraries from the relative path
 if(NOT MSVC)
@@ -42,13 +45,13 @@ endif()
 
 # C++ Replay example
 add_executable(main_replay ${PLUGIN_SRC} examples/main_replay.cpp)
-target_link_libraries(main_replay PRIVATE ${PLUGIN_LIBS})
-target_include_directories(main_replay PRIVATE "include/spectacularAI/unity")
+target_link_libraries(main_replay PRIVATE ${PLUGIN_LIBS} OpenGL::GL GLEW::GLEW)
+target_include_directories(main_replay PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include "include/spectacularAI/unity")
 
 # C++ DepthAI example
 add_executable(main_depthai ${PLUGIN_SRC} examples/main_depthai.cpp)
-target_link_libraries(main_depthai PRIVATE ${PLUGIN_LIBS})
-target_include_directories(main_depthai PRIVATE "include/spectacularAI/unity")
+target_link_libraries(main_depthai PRIVATE ${PLUGIN_LIBS} OpenGL::GL GLEW::GLEW)
+target_include_directories(main_depthai PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include "include/spectacularAI/unity")
 
 if(MSVC)
   add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD

@@ -1,44 +1,55 @@
 using System;
 using System.Runtime.InteropServices;
 using UnityEngine;
+using SpectacularAI;
 using SpectacularAI.DepthAI;
+using SpectacularAI.Native;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
 
 public static class NativeReprojection
 {
-  [DllImport("SpectacularAIPlugin")]
+  [DllImport(ApiConstants.saiNativeApi, CallingConvention = ApiConstants.saiCallingConvention)]
   public static extern void sai_set_rendered_orientation(double x, double y, double z, double w);
 
-  [DllImport("SpectacularAIPlugin")]
+  [DllImport(ApiConstants.saiNativeApi, CallingConvention = ApiConstants.saiCallingConvention)]
   public static extern void sai_set_vio_output_handle(IntPtr vioOutputHandle, int cameraId);
 
-  [DllImport("SpectacularAIPlugin")]
-  public static extern void sai_start_reprojection_thread(int targetFps);
-
-  [DllImport("SpectacularAIPlugin")]
-  public static extern void sai_stop_reprojection_thread();
-
-  [DllImport("SpectacularAIPlugin")]
+  [DllImport(ApiConstants.saiNativeApi, CallingConvention = ApiConstants.saiCallingConvention)]
   public static extern void sai_set_rendered_texture(uint textureId);
 
-  [DllImport("SpectacularAIPlugin")]
+  [DllImport(ApiConstants.saiNativeApi, CallingConvention = ApiConstants.saiCallingConvention)]
   public static extern void sai_reprojection_plugin_event(int eventId);
+
+  // New: Import the function pointer for the render event
+  [DllImport(ApiConstants.saiNativeApi, CallingConvention = ApiConstants.saiCallingConvention)]
+  public static extern IntPtr GetRenderEventFunc();
+
+  // Cache the function pointer
+  private static IntPtr _renderEventFuncPtr = IntPtr.Zero;
+  public static IntPtr RenderEventFuncPtr
+  {
+    get
+    {
+      if (_renderEventFuncPtr == IntPtr.Zero)
+        _renderEventFuncPtr = GetRenderEventFunc();
+      return _renderEventFuncPtr;
+    }
+  }
 }
 
 public class NativeReprojectionDemo : MonoBehaviour
 {
   public int CameraId = 0;
   public int TargetFps = 60;
-  private bool _started = false;
-  private Camera _camera;
+  private UnityEngine.Camera _camera;
   private RenderTexture _offscreenRT;
 
   void Awake()
   {
-    _camera = GetComponent<Camera>();
+    _camera = GetComponent<UnityEngine.Camera>();
     if (_camera == null)
-      _camera = Camera.main;
+      _camera = UnityEngine.Camera.main;
     if (_camera == null)
       Debug.LogError("NativeReprojectionDemo: No Camera found!");
   }
@@ -51,25 +62,31 @@ public class NativeReprojectionDemo : MonoBehaviour
   void OnDisable()
   {
     RenderPipelineManager.endCameraRendering -= OnEndCameraRendering;
-    if (_started)
-      NativeReprojection.sai_stop_reprojection_thread();
   }
 
-  void OnEndCameraRendering(ScriptableRenderContext ctx, Camera cam)
+  void OnEndCameraRendering(ScriptableRenderContext ctx, UnityEngine.Camera cam)
   {
+    // Debug.Log($"NativeReprojectionDemo: OnEndCameraRendering for camera {cam.name}");
     if (cam.cameraType != CameraType.Game) return;
     var target = cam.activeTexture ?? (RenderTexture)cam.targetTexture;
     if (target == null) return;
     var texPtr = target.GetNativeTexturePtr();
     if (texPtr != IntPtr.Zero)
+    {
+      // Debug.Log($"NativeReprojectionDemo: Rendering to target {target.name} with id {target.GetNativeTexturePtr()}");
       NativeReprojection.sai_set_rendered_texture((uint)texPtr.ToInt64());
+    }
 
-    // Issue the plugin event to trigger reprojection on the render thread
-    GL.IssuePluginEvent(
-      Marshal.GetFunctionPointerForDelegate(
-        (Action<int>)NativeReprojection.sai_reprojection_plugin_event),
-      0 // eventId, not used in plugin
-    );
+    // Vio output handle is new each update, so we set it here
+    var vioHandle = Vio.Output?.GetNativeHandle();
+    if (vioHandle.HasValue && vioHandle.Value != IntPtr.Zero)
+    {
+      // Debug.Log($"NativeReprojectionDemo: Setting VIO output handle for camera {CameraId} with handle {vioHandle.Value}");
+      NativeReprojection.sai_set_vio_output_handle(vioHandle.Value, CameraId);
+    }
+
+    // Issue the plugin event to trigger reprojection on the render thread (new pattern)
+    GL.IssuePluginEvent(NativeReprojection.RenderEventFuncPtr, 0); // eventId, not used in plugin
   }
 
   void Start()
@@ -81,23 +98,11 @@ public class NativeReprojectionDemo : MonoBehaviour
       _offscreenRT.Create();
       _camera.targetTexture = _offscreenRT;
     }
-    // Get VIO output handle from DepthAI session
-    var vio = FindObjectOfType<VioOutputProvider>();
-    if (vio == null)
-    {
-      Debug.LogError("No VioOutputProvider found in scene");
-      return;
-    }
-    IntPtr vioHandle = vio.GetNativeHandle();
-    NativeReprojection.sai_set_vio_output_handle(vioHandle, CameraId);
-    NativeReprojection.sai_start_reprojection_thread(TargetFps);
-    _started = true;
+    // Remove VIO initialization from Start()
   }
 
   void OnDestroy()
   {
-    if (_started)
-      NativeReprojection.sai_stop_reprojection_thread();
     if (_offscreenRT != null)
     {
       if (_camera != null && _camera.targetTexture == _offscreenRT)
@@ -109,10 +114,10 @@ public class NativeReprojectionDemo : MonoBehaviour
 
   void LateUpdate()
   {
-    // Get the current orientation in SAI coordinates
+    // Update pose for timewarp
     var poseProvider = FindObjectOfType<PoseProvider>();
     if (poseProvider == null) return;
-    var orientationUnity = TransformCameraToWorldQuaternionToSpectacularAI(poseProvider.transform.rotation);
+    var orientationUnity = Utility.TransformCameraToWorldQuaternionToSpectacularAI(transform.rotation);
     NativeReprojection.sai_set_rendered_orientation(
         orientationUnity.x, orientationUnity.y, orientationUnity.z, orientationUnity.w);
   }
