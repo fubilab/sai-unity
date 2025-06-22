@@ -6,6 +6,7 @@ using SpectacularAI.DepthAI;
 using SpectacularAI.Native;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
+using Unity.VisualScripting;
 
 public static class NativeReprojection
 {
@@ -36,6 +37,9 @@ public static class NativeReprojection
       return _renderEventFuncPtr;
     }
   }
+
+  [DllImport(ApiConstants.saiNativeApi, CallingConvention = ApiConstants.saiCallingConvention)]
+  public static extern void sai_set_projection_matrix([MarshalAs(UnmanagedType.LPArray, SizeConst = 16)] float[] matrix);
 
   [DllImport(ApiConstants.saiNativeApi, CallingConvention = ApiConstants.saiCallingConvention)]
   public static extern void sai_set_rendered_depth(float depth);
@@ -100,6 +104,16 @@ public class NativeReprojectionDemo : MonoBehaviour
       _offscreenRT = new RenderTexture(Screen.width, Screen.height, 24, RenderTextureFormat.ARGB32);
       _offscreenRT.Create();
       _camera.targetTexture = _offscreenRT;
+
+      // --- Send projection matrix to plugin ONCE ---
+      // Send the camera's raw projection matrix. We will convert it in the plugin.
+      Matrix4x4 projMatrix = _camera.projectionMatrix;
+      float[] projMatrixArray = new float[16];
+      for (int i = 0; i < 16; i++)
+      {
+          projMatrixArray[i] = projMatrix[i];
+      }
+      NativeReprojection.sai_set_projection_matrix(projMatrixArray);
     }
     // Remove VIO initialization from Start()
   }
@@ -116,27 +130,38 @@ public class NativeReprojectionDemo : MonoBehaviour
   }
 
   private float _lastDepth = 1.0f; // Default fallback depth
+  private bool _depthTestMode = false;
 
   void Update()
   {
-    // Example: set _lastDepth to a fixed value for now (replace with real depth sampling if available)
-    _lastDepth = 1.0f; // TODO: Replace with actual min depth sampling
+    if (Input.GetKeyDown(KeyCode.Space))
+    {
+      _depthTestMode = !_depthTestMode;
+      Debug.Log($"[NativeReprojectionDemo] Depth test mode: {_depthTestMode}");
+    }
+    if (_depthTestMode)
+    {
+      if (Input.GetKeyDown(KeyCode.UpArrow))
+      {
+        _lastDepth += 1f;
+        Debug.Log($"[NativeReprojectionDemo] Depth increased: {_lastDepth:F2}");
+      }
+      if (Input.GetKeyDown(KeyCode.DownArrow))
+      {
+        _lastDepth = Mathf.Max(0.1f, _lastDepth - 1f);
+        Debug.Log($"[NativeReprojectionDemo] Depth decreased: {_lastDepth:F2}");
+      }
+    }
     NativeReprojection.sai_set_rendered_depth(_lastDepth);
   }
 
   void LateUpdate()
   {
-    // Update pose for timewarp
+    if (_depthTestMode)
+      return; // Don't send orientation updates in test mode
+    if (Vio.Output is null)
+      return; // No VIO output, nothing to update
     var unityQuat = Vio.Output.Pose._orientation;
-    // var eulerUnity = unityQuat.eulerAngles;
-    // // Apply permutation to euler angles
-    // var perm = Permutations[_permIndex];
-    // float[] e = { eulerUnity.x, eulerUnity.y, eulerUnity.z };
-    // float[] pe = new float[3];
-    // for (int i = 0; i < 3; ++i) pe[i] = e[perm.order[i]] * perm.sign[i];
-    // Debug.Log($"[NativeReprojectionDemo] Unity Euler sent to plugin (perm {perm.name}): {pe[0]:F3}, {pe[1]:F3}, {pe[2]:F3}");
-    // // Optionally, convert back to quaternion and send to plugin
-    // var permQuat = UnityEngine.Quaternion.Euler(pe[0], pe[1], pe[2]);
     NativeReprojection.sai_set_rendered_orientation(unityQuat.x, unityQuat.y, unityQuat.z, unityQuat.w);
   }
 }

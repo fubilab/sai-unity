@@ -156,6 +156,10 @@ static std::atomic<uint32_t> g_renderedTextureId{0};
 static std::atomic<double> g_orientation_rendered[4];
 static std::atomic<float> g_renderedDepth{1.0f};
 
+static std::mutex g_projectionMutex;
+static float g_projectionMatrix[16];
+static std::atomic<bool> g_hasProjectionMatrix{false};
+
 struct OrientationInit {
     OrientationInit() {
         g_orientation_rendered[0] = 1.0;
@@ -367,21 +371,43 @@ static void UNITY_INTERFACE_API OnRenderEvent(int eventId) {
     double norm = sqrt(d_x*d_x + d_y*d_y + d_z*d_z + d_w*d_w);
     d_x /= norm; d_y /= norm; d_z /= norm; d_w /= norm;
 
-    // We want to apply the inverse rotation to the quad, to counteract camera motion
-    d_x = -d_x;
-    d_y = -d_y;
-    d_z = -d_z;
+    // The view rotation is the inverse of the delta rotation.
+    // For a unit quaternion, inverse is the conjugate.
+    const double qx = -d_x;
+    const double qy = -d_y;
+    const double qz = -d_z;
+    const double qw = d_w;
 
-    // --- Build rotation matrix from delta quaternion ---
-    float xx = d_x * d_x;
-    float yy = d_y * d_y;
-    float zz = d_z * d_z;
-    float xy = d_x * d_y;
-    float xz = d_x * d_z;
-    float yz = d_y * d_z;
-    float wx = d_w * d_x;
-    float wy = d_w * d_y;
-    float wz = d_w * d_z;
+    // --- Get Projection Matrix ---
+    if (!g_hasProjectionMatrix.load()) {
+        // No projection matrix from Unity yet.
+        return;
+    }
+    float projMatrix[16];
+    {
+        std::lock_guard<std::mutex> lock(g_projectionMutex);
+        for (int i = 0; i < 16; ++i) projMatrix[i] = g_projectionMatrix[i];
+    }
+
+    // Manually convert Unity's projection matrix (column-major) to OpenGL's.
+    // This is to account for the different clip space depth range ([0, 1] vs [-1, 1]).
+    // The conversion is: z_gl = 2 * z_unity - 1. This means the 3rd row of the matrix
+    // needs to be modified as: row3_gl = 2 * row3_unity - row4_unity.
+    projMatrix[2] = projMatrix[2] * 2.0f - projMatrix[3];
+    projMatrix[6] = projMatrix[6] * 2.0f - projMatrix[7];
+    projMatrix[10] = projMatrix[10] * 2.0f - projMatrix[11];
+    projMatrix[14] = projMatrix[14] * 2.0f - projMatrix[15];
+
+    // --- Build ModelView Matrix (Row-Major) ---
+    float xx = qx * qx;
+    float yy = qy * qy;
+    float zz = qz * qz;
+    float xy = qx * qy;
+    float xz = qx * qz;
+    float yz = qy * qz;
+    float wx = qw * qx;
+    float wy = qw * qy;
+    float wz = qw * qz;
     float rot[16];
     rot[0] = 1.0f - 2.0f * (yy + zz);
     rot[1] = 2.0f * (xy - wz);
@@ -400,25 +426,42 @@ static void UNITY_INTERFACE_API OnRenderEvent(int eventId) {
     rot[14] = 0.0f;
     rot[15] = 1.0f;
 
-    // --- Eigen-based quad shift ---
+    float modelViewRowMajor[16];
+    for (int i = 0; i < 16; ++i) modelViewRowMajor[i] = rot[i]; // Copy rotation
     float depth = g_renderedDepth.load();
-    Eigen::Vector3f center(0, 0, depth);
-    Eigen::Quaternionf dq((float)d_w, (float)d_x, (float)d_y, (float)d_z);
-    Eigen::Vector3f shifted = dq * center;
-    Eigen::Vector3f offset = shifted - center;
-    float trans[16] = {
-        1, 0, 0, offset.x(),
-        0, 1, 0, offset.y(),
-        0, 0, 1, offset.z(),
-        0, 0, 0, 1
+    modelViewRowMajor[3]  += rot[2] * (-depth);
+    modelViewRowMajor[7]  += rot[6] * (-depth);
+    modelViewRowMajor[11] += rot[10] * (-depth);
+    modelViewRowMajor[15] += rot[14] * (-depth);
+
+    // --- Transpose ModelView to Column-Major ---
+    float modelViewColMajor[16];
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            modelViewColMajor[i + j*4] = modelViewRowMajor[j + i*4];
+        }
+    }
+
+    // --- Matrix Multiplication Helper (for column-major) ---
+    auto multiply_matrices = [](const float* a, const float* b, float* result) {
+        for (int j = 0; j < 4; ++j) {
+            for (int i = 0; i < 4; ++i) {
+                float sum = 0.0f;
+                for (int k = 0; k < 4; ++k) {
+                    sum += a[i + k*4] * b[k + j*4];
+                }
+                result[i + j*4] = sum;
+            }
+        }
     };
-    float finalMVP[16] = {0};
-    for (int row = 0; row < 4; ++row)
-        for (int col = 0; col < 4; ++col)
-            for (int k = 0; k < 4; ++k)
-                finalMVP[row + col*4] += trans[row + k*4] * rot[k + col*4];
+
+    // --- Final MVP = Projection * ModelView ---
+    float finalMVP[16];
+    multiply_matrices(projMatrix, modelViewColMajor, finalMVP);
+
+    // Modern OpenGL Core profile rendering
     glUseProgram(gShader);
-    glUniformMatrix4fv(gMVPUniform, 1, GL_TRUE, finalMVP);
+    glUniformMatrix4fv(gMVPUniform, 1, GL_FALSE, finalMVP);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, texId);
     glUniform1i(gTexUniform, 0);
@@ -459,6 +502,12 @@ EXPORT_API void sai_set_rendered_texture(uint32_t textureId) {
 
 EXPORT_API void sai_set_rendered_depth(float depth) {
     g_renderedDepth = depth;
+}
+
+EXPORT_API void sai_set_projection_matrix(const float* matrix) {
+    std::lock_guard<std::mutex> lock(g_projectionMutex);
+    for (int i = 0; i < 16; ++i) g_projectionMatrix[i] = matrix[i];
+    g_hasProjectionMatrix = true;
 }
 
 // Plugin event for orientation reprojection
