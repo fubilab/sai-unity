@@ -137,6 +137,7 @@ public class NativeReprojectionDemo : MonoBehaviour
     if (Input.GetKeyDown(KeyCode.Space))
     {
       _depthTestMode = !_depthTestMode;
+      PoseProvider.DepthTestMode = _depthTestMode;
       Debug.Log($"[NativeReprojectionDemo] Depth test mode: {_depthTestMode}");
     }
     if (_depthTestMode)

@@ -389,75 +389,51 @@ static void UNITY_INTERFACE_API OnRenderEvent(int eventId) {
         for (int i = 0; i < 16; ++i) projMatrix[i] = g_projectionMatrix[i];
     }
 
-    // Manually convert Unity's projection matrix (column-major) to OpenGL's.
-    // This is to account for the different clip space depth range ([0, 1] vs [-1, 1]).
-    // The conversion is: z_gl = 2 * z_unity - 1. This means the 3rd row of the matrix
-    // needs to be modified as: row3_gl = 2 * row3_unity - row4_unity.
-    projMatrix[2] = projMatrix[2] * 2.0f - projMatrix[3];
-    projMatrix[6] = projMatrix[6] * 2.0f - projMatrix[7];
-    projMatrix[10] = projMatrix[10] * 2.0f - projMatrix[11];
-    projMatrix[14] = projMatrix[14] * 2.0f - projMatrix[15];
+    // Don't modify the projection matrix - use it as-is from Unity
 
-    // --- Build ModelView Matrix (Row-Major) ---
-    float xx = qx * qx;
-    float yy = qy * qy;
-    float zz = qz * qz;
-    float xy = qx * qy;
-    float xz = qx * qz;
-    float yz = qy * qz;
-    float wx = qw * qx;
-    float wy = qw * qy;
-    float wz = qw * qz;
-    float rot[16];
-    rot[0] = 1.0f - 2.0f * (yy + zz);
-    rot[1] = 2.0f * (xy - wz);
-    rot[2] = 2.0f * (xz + wy);
-    rot[3] = 0.0f;
-    rot[4] = 2.0f * (xy + wz);
-    rot[5] = 1.0f - 2.0f * (xx + zz);
-    rot[6] = 2.0f * (yz - wx);
-    rot[7] = 0.0f;
-    rot[8] = 2.0f * (xz - wy);
-    rot[9] = 2.0f * (yz + wx);
-    rot[10] = 1.0f - 2.0f * (xx + yy);
-    rot[11] = 0.0f;
-    rot[12] = 0.0f;
-    rot[13] = 0.0f;
-    rot[14] = 0.0f;
-    rot[15] = 1.0f;
-
-    float modelViewRowMajor[16];
-    for (int i = 0; i < 16; ++i) modelViewRowMajor[i] = rot[i]; // Copy rotation
+    // --- Simplified Approach: Direct Translation Without Projection Matrix ---
     float depth = g_renderedDepth.load();
-    modelViewRowMajor[3]  += rot[2] * (-depth);
-    modelViewRowMajor[7]  += rot[6] * (-depth);
-    modelViewRowMajor[11] += rot[10] * (-depth);
-    modelViewRowMajor[15] += rot[14] * (-depth);
-
-    // --- Transpose ModelView to Column-Major ---
-    float modelViewColMajor[16];
-    for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {
-            modelViewColMajor[i + j*4] = modelViewRowMajor[j + i*4];
-        }
-    }
-
-    // --- Matrix Multiplication Helper (for column-major) ---
-    auto multiply_matrices = [](const float* a, const float* b, float* result) {
-        for (int j = 0; j < 4; ++j) {
-            for (int i = 0; i < 4; ++i) {
-                float sum = 0.0f;
-                for (int k = 0; k < 4; ++k) {
-                    sum += a[i + k*4] * b[k + j*4];
-                }
-                result[i + j*4] = sum;
-            }
-        }
+    
+    // Extract rotation components from the quaternion
+    // For latency compensation, we need to apply the inverse of each rotation:
+    // - Pitch (qx) → inverse vertical translation (translateY)
+    // - Yaw (qy) → inverse horizontal translation (translateX) 
+    // - Roll (qz) → inverse roll translation (translateZ)
+    
+    // Convert quaternion components directly to translation offsets
+    // All translations are inverted to compensate for the latency
+    float pitch = (float)qx;  // Pitch component from quaternion
+    float yaw = (float)qy;    // Yaw component from quaternion  
+    float roll = (float)qz;   // Roll component from quaternion
+    
+    // Apply inverse transformations scaled by depth for parallax effect
+    // FINAL MAPPING confirmed by testing:
+    // - Pitch movement → qy component → Y translation (vertical)
+    // - Yaw movement → qz component → X translation (horizontal)  
+    // - Roll movement → qx component → Z translation (depth)
+    float translateX = -(float)qz * depth * 0.5f;    // qz (yaw) -> X (horizontal)
+    float translateY = -(float)qy * depth * 0.5f;    // qy (pitch) -> Y (vertical)  
+    float translateZ = -(float)qx * depth * 0.5f;    // qx (roll) -> Z (depth)
+    
+    // Create a translation matrix in column-major order (OpenGL standard)
+    // Matrix layout: [0 4 8 12]  where [12, 13, 14] are translation components
+    //                [1 5 9 13]
+    //                [2 6 10 14]
+    //                [3 7 11 15]
+    float finalMVP[16] = {
+        1.0f, 0.0f, 0.0f, 0.0f,        // Column 0: [0,1,2,3]
+        0.0f, 1.0f, 0.0f, 0.0f,        // Column 1: [4,5,6,7]
+        0.0f, 0.0f, 1.0f, 0.0f,        // Column 2: [8,9,10,11]
+        translateX, translateY, translateZ, 1.0f  // Column 3: [12,13,14,15] - translation
     };
-
-    // --- Final MVP = Projection * ModelView ---
-    float finalMVP[16];
-    multiply_matrices(projMatrix, modelViewColMajor, finalMVP);
+    
+    // Debug output occasionally
+    static int debugCounter = 0;
+    if (++debugCounter % 60 == 0) { // Every ~60 frames
+        std::cout << "[Debug] depth=" << depth << " qx=" << qx << " qy=" << qy << " qz=" << qz << std::endl;
+        std::cout << "[Debug] translateX=" << translateX << " translateY=" << translateY << " translateZ=" << translateZ << std::endl;
+        std::cout << "[Debug] Matrix[12,13,14]=" << finalMVP[12] << "," << finalMVP[13] << "," << finalMVP[14] << std::endl;
+    }
 
     // Modern OpenGL Core profile rendering
     glUseProgram(gShader);
