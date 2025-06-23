@@ -39,26 +39,38 @@ public static class NativeReprojection
   }
 
   [DllImport(ApiConstants.saiNativeApi, CallingConvention = ApiConstants.saiCallingConvention)]
-  public static extern void sai_set_projection_matrix([MarshalAs(UnmanagedType.LPArray, SizeConst = 16)] float[] matrix);
-
-  [DllImport(ApiConstants.saiNativeApi, CallingConvention = ApiConstants.saiCallingConvention)]
   public static extern void sai_set_rendered_depth(float depth);
 }
 
 public class NativeReprojectionDemo : MonoBehaviour
 {
   public int CameraId = 0;
-  public int TargetFps = 60;
   private UnityEngine.Camera _camera;
   private RenderTexture _offscreenRT;
+  private CameraDepthDetector _depthDetector;
 
   void Awake()
   {
+    // Disable this component when running in the Unity Editor since native rendering doesn't work there
+    #if UNITY_EDITOR
+    Debug.LogWarning("NativeReprojectionDemo: Disabled in Unity Editor - native rendering not supported in editor");
+    enabled = false;
+    return;
+    #endif
+    
     _camera = GetComponent<UnityEngine.Camera>();
     if (_camera == null)
       _camera = UnityEngine.Camera.main;
     if (_camera == null)
       Debug.LogError("NativeReprojectionDemo: No Camera found!");
+      
+    // Get or add the depth detector component
+    _depthDetector = _camera.GetComponent<CameraDepthDetector>();
+    if (_depthDetector == null)
+    {
+      _depthDetector = _camera.gameObject.AddComponent<CameraDepthDetector>();
+      Debug.Log("NativeReprojectionDemo: Added CameraDepthDetector component");
+    }
   }
 
   void OnEnable()
@@ -104,18 +116,7 @@ public class NativeReprojectionDemo : MonoBehaviour
       _offscreenRT = new RenderTexture(Screen.width, Screen.height, 24, RenderTextureFormat.ARGB32);
       _offscreenRT.Create();
       _camera.targetTexture = _offscreenRT;
-
-      // --- Send projection matrix to plugin ONCE ---
-      // Send the camera's raw projection matrix. We will convert it in the plugin.
-      Matrix4x4 projMatrix = _camera.projectionMatrix;
-      float[] projMatrixArray = new float[16];
-      for (int i = 0; i < 16; i++)
-      {
-          projMatrixArray[i] = projMatrix[i];
-      }
-      NativeReprojection.sai_set_projection_matrix(projMatrixArray);
     }
-    // Remove VIO initialization from Start()
   }
 
   void OnDestroy()
@@ -134,11 +135,23 @@ public class NativeReprojectionDemo : MonoBehaviour
 
   void Update()
   {
-    if (Input.GetKeyDown(KeyCode.Space))
+    // Get depth from the depth detector if not in test mode
+    if (!_depthTestMode && _depthDetector != null)
+    {
+      _lastDepth = _depthDetector.LastDetectedDepth;
+    }
+    
+    if (Input.GetKeyDown(KeyCode.D))
     {
       _depthTestMode = !_depthTestMode;
       PoseProvider.DepthTestMode = _depthTestMode;
       Debug.Log($"[NativeReprojectionDemo] Depth test mode: {_depthTestMode}");
+      
+      // Enable/disable debug sphere based on test mode
+      if (_depthDetector != null)
+      {
+        _depthDetector.enableDebugSphere = !_depthTestMode;
+      }
     }
     if (_depthTestMode)
     {
@@ -156,6 +169,32 @@ public class NativeReprojectionDemo : MonoBehaviour
     NativeReprojection.sai_set_rendered_depth(_lastDepth);
   }
 
+  void OnGUI()
+  {
+    #if UNITY_EDITOR
+    // Show a message in the editor that this component is disabled
+    if (!enabled)
+    {
+      GUI.Box(new Rect(10, 10, 400, 60), "");
+      GUI.Label(new Rect(15, 15, 390, 20), "NativeReprojectionDemo: DISABLED IN EDITOR");
+      GUI.Label(new Rect(15, 35, 390, 20), "Native rendering only works in builds. CameraDepthDetector still active.");
+      return;
+    }
+    #endif
+    
+    // Display depth value for debugging
+    GUI.Label(new Rect(10, 10, 300, 20), $"Depth: {_lastDepth:F2}m");
+    GUI.Label(new Rect(10, 30, 300, 20), $"Depth Test Mode: {(_depthTestMode ? "ON" : "OFF")}");
+    if (_depthDetector != null)
+    {
+      GUI.Label(new Rect(10, 50, 300, 20), $"Closest Object: {(_depthDetector.LastClosestObject?.name ?? "None")}");
+    }
+    if (_depthTestMode)
+    {
+      GUI.Label(new Rect(10, 70, 300, 20), "Use Up/Down arrows to adjust depth");
+    }
+  }
+
   void LateUpdate()
   {
     if (_depthTestMode)
@@ -165,4 +204,5 @@ public class NativeReprojectionDemo : MonoBehaviour
     var unityQuat = Vio.Output.Pose._orientation;
     NativeReprojection.sai_set_rendered_orientation(unityQuat.x, unityQuat.y, unityQuat.z, unityQuat.w);
   }
+
 }

@@ -156,10 +156,6 @@ static std::atomic<uint32_t> g_renderedTextureId{0};
 static std::atomic<double> g_orientation_rendered[4];
 static std::atomic<float> g_renderedDepth{1.0f};
 
-static std::mutex g_projectionMutex;
-static float g_projectionMatrix[16];
-static std::atomic<bool> g_hasProjectionMatrix{false};
-
 struct OrientationInit {
     OrientationInit() {
         g_orientation_rendered[0] = 1.0;
@@ -381,19 +377,6 @@ static void UNITY_INTERFACE_API OnRenderEvent(int eventId) {
     const double qz = -d_z;
     const double qw = d_w;
 
-    // --- Get Projection Matrix ---
-    if (!g_hasProjectionMatrix.load()) {
-        // No projection matrix from Unity yet.
-        return;
-    }
-    float projMatrix[16];
-    {
-        std::lock_guard<std::mutex> lock(g_projectionMutex);
-        for (int i = 0; i < 16; ++i) projMatrix[i] = g_projectionMatrix[i];
-    }
-
-    // Don't modify the projection matrix - use it as-is from Unity
-
     // --- Convert Delta Quaternion to Euler Angles ---
     // This provides a more stable representation of rotation than raw components.
     const double yaw_angle   = atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz));
@@ -404,9 +387,9 @@ static void UNITY_INTERFACE_API OnRenderEvent(int eventId) {
     float depth = g_renderedDepth.load();
 
     // Apply inverse transformations. Parallax effect for translation is scaled by depth.
-    float translateX = -yaw_angle * depth * 1.5f;   // Yaw -> X translation
-    float translateY = -pitch_angle * depth * 1.5f; // Pitch -> Y translation
-    float rollAngle  = -roll_angle_rad * 1.5f;             // Roll -> 2D rotation of the quad (not depth dependent)
+    float translateX = -yaw_angle * depth;   // Yaw -> X translation
+    float translateY = -pitch_angle * depth; // Pitch -> Y translation
+    float rollAngle  = -roll_angle_rad * 3.0f;             // Roll -> 2D rotation of the quad (not depth dependent)
 
     // Create a transformation matrix with translation and roll rotation
     float cosRoll = cos(rollAngle);
@@ -421,13 +404,13 @@ static void UNITY_INTERFACE_API OnRenderEvent(int eventId) {
     };
     
     // Debug output occasionally
-    static int debugCounter = 0;
-    if (++debugCounter % 30 == 0) { // Every ~30 frames
-        std::cout << "[Reproject] Euler (deg): Yaw=" << (yaw_angle * 180.0/3.14159)
-                  << ", Pitch=" << (pitch_angle * 180.0/3.14159)
-                  << ", Roll=" << (roll_angle_rad * 180.0/3.14159) << std::endl;
-        std::cout << "[Reproject] Transform: X=" << translateX << " Y=" << translateY << " Roll=" << (rollAngle * 180.0f / 3.14159265f) << " deg" << std::endl;
-    }
+    // static int debugCounter = 0;
+    // if (++debugCounter % 30 == 0) { // Every ~30 frames
+    //     std::cout << "[Reproject] Euler (deg): Yaw=" << (yaw_angle * 180.0/3.14159)
+    //               << ", Pitch=" << (pitch_angle * 180.0/3.14159)
+    //               << ", Roll=" << (roll_angle_rad * 180.0/3.14159) << std::endl;
+    //     std::cout << "[Reproject] Transform: X=" << translateX << " Y=" << translateY << " Roll=" << (rollAngle * 180.0f / 3.14159265f) << " deg" << std::endl;
+    // }
 
     // Modern OpenGL Core profile rendering
     glUseProgram(gShader);
@@ -472,12 +455,6 @@ EXPORT_API void sai_set_rendered_texture(uint32_t textureId) {
 
 EXPORT_API void sai_set_rendered_depth(float depth) {
     g_renderedDepth = depth;
-}
-
-EXPORT_API void sai_set_projection_matrix(const float* matrix) {
-    std::lock_guard<std::mutex> lock(g_projectionMutex);
-    for (int i = 0; i < 16; ++i) g_projectionMatrix[i] = matrix[i];
-    g_hasProjectionMatrix = true;
 }
 
 // Plugin event for orientation reprojection
