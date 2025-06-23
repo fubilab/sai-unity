@@ -261,6 +261,36 @@ void ensureQuadResources() {
 }
 // --- End modern OpenGL helpers ---
 
+// Helper to convert quaternion to Euler angles by transforming basis vectors
+static void quaternionToEuler(double qx, double qy, double qz, double qw, double& yaw, double& pitch, double& roll) {
+    // Get yaw and pitch from the direction of the transformed forward vector (0,0,1)
+    const double fwd_x = 2.0 * (qx * qz + qw * qy);
+    const double fwd_y = 2.0 * (qy * qz - qw * qx);
+    const double fwd_z = 1.0 - 2.0 * (qx * qx + qy * qy);
+
+    // Get roll from the orientation of the transformed right vector (1,0,0)
+    const double right_x = 1.0 - 2.0 * (qy * qy + qz * qz);
+    const double right_y = 2.0 * (qx * qy + qw * qz);
+
+    // Calculate angles from the transformed vectors
+    yaw   = atan2(fwd_x, fwd_z);
+    
+    double sin_pitch = -fwd_y;
+    if (sin_pitch > 1.0) sin_pitch = 1.0;
+    if (sin_pitch < -1.0) sin_pitch = -1.0;
+    pitch = asin(sin_pitch);
+    
+    roll = atan2(right_y, right_x);
+}
+
+// Helper to normalize angle difference to [-PI, PI]
+static double normalizeAngleDifference(double diff) {
+    const double PI = 3.14159265358979323846;
+    while (diff <= -PI) diff += 2 * PI;
+    while (diff > PI) diff -= 2 * PI;
+    return diff;
+}
+
 static IUnityInterfaces* s_UnityInterfaces = nullptr;
 static IUnityGraphics* s_UnityGraphics = nullptr;
 
@@ -358,38 +388,35 @@ static void UNITY_INTERFACE_API OnRenderEvent(int eventId) {
         }
     }
 
-    // std::cout << "[SAI Reprojection] Latest orientation (from VIO): "
-    //           << l_x << ", " << l_y << ", " << l_z << ", " << l_w << std::endl;
+    // --- New approach: Calculate delta rotation in rendered camera's local space ---
+    // This avoids gimbal lock issues and heading-dependent rotation axes.
 
-    // Compute delta = latest * inverse(rendered)
-    double inv_r_x = -r_x, inv_r_y = -r_y, inv_r_z = -r_z, inv_r_w = r_w;
-    double d_x = l_w * inv_r_x + l_x * inv_r_w + l_y * inv_r_z - l_z * inv_r_y;
-    double d_y = l_w * inv_r_y - l_x * inv_r_z + l_y * inv_r_w + l_z * inv_r_x;
-    double d_z = l_w * inv_r_z + l_x * inv_r_y - l_y * inv_r_x + l_z * inv_r_w;
-    double d_w = l_w * inv_r_w - l_x * inv_r_x - l_y * inv_r_y - l_z * inv_r_z;
-    double norm = sqrt(d_x*d_x + d_y*d_y + d_z*d_z + d_w*d_w);
-    d_x /= norm; d_y /= norm; d_z /= norm; d_w /= norm;
+    // Create Eigen quaternions (w, x, y, z)
+    Eigen::Quaterniond q_rendered(r_w, r_x, r_y, r_z);
+    Eigen::Quaterniond q_latest(l_w, l_x, l_y, l_z);
+    q_rendered.normalize();
+    q_latest.normalize();
 
-    // The view rotation is the inverse of the delta rotation.
-    // For a unit quaternion, inverse is the conjugate.
-    const double qx = -d_x;
-    const double qy = -d_y;
-    const double qz = -d_z;
-    const double qw = d_w;
+    // Calculate the delta rotation in the rendered camera's local frame.
+    // This gives us the rotation from the rendered orientation to the latest one.
+    Eigen::Quaterniond q_delta_local = q_rendered.inverse() * q_latest;
+    q_delta_local.normalize();
 
-    // --- Convert Delta Quaternion to Euler Angles ---
-    // This provides a more stable representation of rotation than raw components.
-    const double yaw_angle   = atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz));
-    const double pitch_angle = -asin(2.0 * (qw * qy - qz * qx));
-    const double roll_angle_rad  = -atan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx * qx + qy * qy));
+    // Convert the local delta quaternion to Euler angles (yaw, pitch, roll).
+    // These angles represent rotations around the camera's local axes,
+    // which is what we need for the 2D reprojection effect.
+    double yaw_angle, pitch_angle, roll_angle_rad;
+    quaternionToEuler(q_delta_local.x(), q_delta_local.y(), q_delta_local.z(), q_delta_local.w(),
+                      yaw_angle, pitch_angle, roll_angle_rad);
 
-    // --- Apply transformations based on Euler angles ---
+    // --- Apply transformations based on calculated angles ---
     float depth = g_renderedDepth.load();
 
     // Apply inverse transformations. Parallax effect for translation is scaled by depth.
-    float translateX = -yaw_angle * depth;   // Yaw -> X translation
-    float translateY = -pitch_angle * depth; // Pitch -> Y translation
-    float rollAngle  = -roll_angle_rad * 3.0f;             // Roll -> 2D rotation of the quad (not depth dependent)
+    // The signs are chosen to match the visual effect of camera rotation.
+    float translateX = -yaw_angle * depth;   // Yaw (Y-rot) -> X translation
+    float translateY = -pitch_angle * depth; // Pitch (X-rot) -> Y translation
+    float rollAngle  = roll_angle_rad * 3.0f; // Roll (Z-rot) -> 2D rotation
 
     // Create a transformation matrix with translation and roll rotation
     float cosRoll = cos(rollAngle);
