@@ -13,6 +13,7 @@
 #include <mutex>
 #include <cmath>
 #include <Eigen/Geometry>
+#include <cstring>
 
 // Remove threading, keep global VioOutputWrapper* and texture/orientation state
 static std::mutex g_vioOutputMutex;
@@ -185,6 +186,19 @@ UnityPluginUnload() {
     // Nothing to clean up
 }
 
+// --- New: Store Unity camera projection matrix for accurate reprojection ---
+static float g_renderedProjection[16] = {
+    1,0,0,0,
+    0,1,0,0,
+    0,0,1,0,
+    0,0,0,1
+};
+
+extern "C" EXPORT_API void sai_set_rendered_projection(const float* matrix16) {
+    // Expects column-major 4x4 matrix from Unity (float[16])
+    for (int i = 0; i < 16; ++i) g_renderedProjection[i] = matrix16[i];
+}
+
 // The GL render callback (all OpenGL code goes here)
 static void UNITY_INTERFACE_API OnRenderEvent(int /*eventId*/) {
     if (!s_UnityGraphics) return;
@@ -280,11 +294,14 @@ static void UNITY_INTERFACE_API OnRenderEvent(int /*eventId*/) {
     // --- Apply transformations based on calculated angles ---
     float depth = g_renderedDepth.load();
 
-    // Apply inverse transformations. Parallax effect for translation is scaled by depth.
-    // The signs are chosen to match the visual effect of camera rotation.
-    float translateX = -yaw_angle * depth;   // Yaw (Y-rot) -> X translation
-    float translateY = -pitch_angle * depth; // Pitch (X-rot) -> Y translation
-    float rollAngle  = roll_angle_rad * 3.0f; // Roll (Z-rot) -> 2D rotation
+    // --- Use Unity projection matrix for translation scaling ---
+    float tanHalfFovY = 1.0f / g_renderedProjection[5];
+    // Use the aspect ratio already defined above
+    // Parallax effect: closer objects move more (inverse depth)
+    float invDepth = 1.0f / depth;
+    float translateX = -tan(yaw_angle) * invDepth / (tanHalfFovY * aspect);
+    float translateY = -tan(pitch_angle) * invDepth / tanHalfFovY;
+    float rollAngle  = roll_angle_rad * 1.0f; // Roll (Z-rot) -> 2D rotation
 
     // Create a transformation matrix with translation and roll rotation
     float cosRoll = cos(rollAngle);

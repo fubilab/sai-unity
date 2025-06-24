@@ -40,6 +40,9 @@ public static class NativeReprojection
 
   [DllImport(ApiConstants.saiNativeApi, CallingConvention = ApiConstants.saiCallingConvention)]
   public static extern void sai_set_rendered_depth(float depth);
+
+  [DllImport(ApiConstants.saiNativeApi, CallingConvention = ApiConstants.saiCallingConvention)]
+  public static extern void sai_set_rendered_projection([In] float[] matrix16);
 }
 
 public class NativeReprojectionDemo : MonoBehaviour
@@ -116,6 +119,18 @@ public class NativeReprojectionDemo : MonoBehaviour
       _offscreenRT = new RenderTexture(Screen.width, Screen.height, 24, RenderTextureFormat.ARGB32);
       _offscreenRT.Create();
       _camera.targetTexture = _offscreenRT;
+    }
+
+    // --- Pass Unity camera projection matrix to native plugin ---
+    if (_camera != null)
+    {
+      // Unity's projectionMatrix is row-major, plugin expects column-major
+      Matrix4x4 proj = _camera.projectionMatrix;
+      float[] projColMajor = new float[16];
+      for (int row = 0; row < 4; ++row)
+        for (int col = 0; col < 4; ++col)
+          projColMajor[col * 4 + row] = proj[row, col];
+      NativeReprojection.sai_set_rendered_projection(projColMajor);
     }
   }
 
