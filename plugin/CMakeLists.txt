@@ -18,6 +18,7 @@ find_package(Eigen3 REQUIRED)
 set(PLUGIN_SRC
   src/replay.cpp
   src/output.cpp
+  src/render.cpp
   src/util.cpp
   src/depthai.cpp
   src/mapping.cpp

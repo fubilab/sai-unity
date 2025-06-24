@@ -1,0 +1,369 @@
+#include "../include/spectacularAI/unity/render.hpp"
+#include "../include/spectacularAI/unity/output.hpp"
+#include "../include/spectacularAI/unity/util.hpp"
+
+#include <GL/glew.h>
+#ifdef __APPLE__
+#include <OpenGL/gl3.h>
+#else
+#include <GL/gl.h>
+#endif
+#include <iostream>
+#include <atomic>
+#include <mutex>
+#include <cmath>
+#include <Eigen/Geometry>
+
+// Remove threading, keep global VioOutputWrapper* and texture/orientation state
+static std::mutex g_vioOutputMutex;
+static std::shared_ptr<const spectacularAI::VioOutput> g_vioOutput;
+static int g_cameraId{0};
+static std::mutex g_orientationMutex;
+static std::atomic<uint32_t> g_renderedTextureId{0};
+static std::atomic<double> g_orientation_rendered[4];
+static std::atomic<float> g_renderedDepth{1.0f};
+
+struct OrientationInit {
+    OrientationInit() {
+        g_orientation_rendered[0] = 1.0;
+        g_orientation_rendered[1] = 0.0;
+        g_orientation_rendered[2] = 0.0;
+        g_orientation_rendered[3] = 0.0;
+    }
+};
+static OrientationInit orientationInit;
+
+// --- Modern OpenGL Core profile quad rendering ---
+namespace {
+GLuint gQuadVAO = 0, gQuadVBO = 0, gShader = 0;
+GLint gMVPUniform = -1, gTexUniform = -1;
+
+const char* quadVert = R"(
+#version 330 core
+layout(location = 0) in vec2 aPos;
+layout(location = 1) in vec2 aUV;
+uniform mat4 uMVP;
+out vec2 vUV;
+void main() {
+    vUV = aUV;
+    gl_Position = uMVP * vec4(aPos, 0.0, 1.0);
+}
+)";
+
+const char* quadFrag = R"(
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+uniform sampler2D uTex;
+void main() {
+    FragColor = texture(uTex, vUV);
+}
+)";
+
+GLuint compileShader(GLenum type, const char* src) {
+    GLuint s = glCreateShader(type);
+    glShaderSource(s, 1, &src, nullptr);
+    glCompileShader(s);
+    GLint ok = 0;
+    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[512];
+        glGetShaderInfoLog(s, 512, nullptr, log);
+        std::cerr << "Shader compile error: " << log << std::endl;
+    }
+    return s;
+}
+
+GLuint createShaderProgram(const char* vs, const char* fs) {
+    GLuint v = compileShader(GL_VERTEX_SHADER, vs);
+    GLuint f = compileShader(GL_FRAGMENT_SHADER, fs);
+    GLuint prog = glCreateProgram();
+    glAttachShader(prog, v);
+    glAttachShader(prog, f);
+    glLinkProgram(prog);
+    glDeleteShader(v);
+    glDeleteShader(f);
+    GLint ok = 0;
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[512];
+        glGetProgramInfoLog(prog, 512, nullptr, log);
+        std::cerr << "Program link error: " << log << std::endl;
+    }
+    return prog;
+}
+
+void ensureQuadResources() {
+    static bool glewInitialized = false;
+    if (!glewInitialized) {
+        GLenum err = glewInit();
+        if (err != GLEW_OK) {
+            std::cerr << "GLEW init error: " << glewGetErrorString(err) << std::endl;
+        }
+        glewInitialized = true;
+    }
+    if (gQuadVAO) return;
+    float quadVerts[] = {
+        // pos      // uv
+        -1, -1,     0, 0,
+         1, -1,     1, 0,
+        -1,  1,     0, 1,
+         1,  1,     1, 1
+    };
+    glGenVertexArrays(1, &gQuadVAO);
+    glGenBuffers(1, &gQuadVBO);
+    glBindVertexArray(gQuadVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, gQuadVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVerts), quadVerts, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    gShader = createShaderProgram(quadVert, quadFrag);
+    gMVPUniform = glGetUniformLocation(gShader, "uMVP");
+    gTexUniform = glGetUniformLocation(gShader, "uTex");
+}
+}
+// --- End modern OpenGL helpers ---
+
+// Helper to convert quaternion to Euler angles by transforming basis vectors
+static void quaternionToEuler(double qx, double qy, double qz, double qw, double& yaw, double& pitch, double& roll) {
+    // Get yaw and pitch from the direction of the transformed forward vector (0,0,1)
+    const double fwd_x = 2.0 * (qx * qz + qw * qy);
+    const double fwd_y = 2.0 * (qy * qz - qw * qx);
+    const double fwd_z = 1.0 - 2.0 * (qx * qx + qy * qy);
+
+    // Get roll from the orientation of the transformed right vector (1,0,0)
+    const double right_x = 1.0 - 2.0 * (qy * qy + qz * qz);
+    const double right_y = 2.0 * (qx * qy + qw * qz);
+
+    // Calculate angles from the transformed vectors
+    yaw   = atan2(fwd_x, fwd_z);
+    
+    double sin_pitch = -fwd_y;
+    if (sin_pitch > 1.0) sin_pitch = 1.0;
+    if (sin_pitch < -1.0) sin_pitch = -1.0;
+    pitch = asin(sin_pitch);
+    
+    roll = atan2(right_y, right_x);
+}
+
+// Helper to normalize angle difference to [-PI, PI]
+// Currently unused but kept for potential future use
+// static double normalizeAngleDifference(double diff) {
+//     const double PI = 3.14159265358979323846;
+//     while (diff <= -PI) diff += 2 * PI;
+//     while (diff > PI) diff -= 2 * PI;
+//     return diff;
+// }
+
+static IUnityInterfaces* s_UnityInterfaces = nullptr;
+static IUnityGraphics* s_UnityGraphics = nullptr;
+
+// Forward declaration for the GL render callback
+static void UNITY_INTERFACE_API OnRenderEvent(int eventId);
+
+extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+UnityPluginLoad(IUnityInterfaces* unityInterfaces) {
+    s_UnityInterfaces = unityInterfaces;
+    s_UnityGraphics = s_UnityInterfaces->Get<IUnityGraphics>();
+    if (s_UnityGraphics) {
+        s_UnityGraphics->RegisterDeviceEventCallback([](UnityGfxDeviceEventType eventType) {
+            if (eventType == kUnityGfxDeviceEventInitialize) {
+                s_UnityGraphics = s_UnityInterfaces->Get<IUnityGraphics>();
+            } else if (eventType == kUnityGfxDeviceEventShutdown) {
+                s_UnityGraphics = nullptr;
+            }
+        });
+    }
+}
+
+extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+UnityPluginUnload() {
+    // Nothing to clean up
+}
+
+// The GL render callback (all OpenGL code goes here)
+static void UNITY_INTERFACE_API OnRenderEvent(int /*eventId*/) {
+    if (!s_UnityGraphics) return;
+
+    ensureQuadResources();
+
+    // Bind default framebuffer to ensure drawing to Unity's backbuffer
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    uint32_t texId = g_renderedTextureId.load();
+    if (texId == 0) {
+        std::cerr << "[OnRenderEvent] No valid texture ID set, skipping render." << std::endl;
+        return;
+    }
+    if (!glIsTexture(texId)) {
+        std::cerr << "[OnRenderEvent] Texture ID " << texId << " is not a valid GL texture, skipping render." << std::endl;
+        return;
+    }
+    int width = 0, height = 0;
+    glBindTexture(GL_TEXTURE_2D, texId);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    if (width <= 0 || height <= 0) {
+        std::cerr << "[OnRenderEvent] Texture has invalid size (" << width << ", " << height << "), skipping render." << std::endl;
+        return;
+    }
+
+    const float aspect = (height > 0) ? (float)width / (float)height : 1.0f;
+
+    glViewport(0, 0, width, height);
+    GLenum err = glGetError();
+    if (err != GL_NO_ERROR) {
+        std::cerr << "[OnRenderEvent] OpenGL error before rendering: 0x" << std::hex << err << std::dec << std::endl;
+        return;
+    }
+    // Get rendered orientation
+    double r_x, r_y, r_z, r_w;
+    {
+        std::lock_guard<std::mutex> lock(g_orientationMutex);
+        r_x = g_orientation_rendered[0];
+        r_y = g_orientation_rendered[1];
+        r_z = g_orientation_rendered[2];
+        r_w = g_orientation_rendered[3];
+    }
+
+    // std::cout << "[SAI Reprojection] Rendered orientation (from Unity): "
+    //           << r_x << ", " << r_y << ", " << r_z << ", " << r_w << std::endl;
+
+    // Get latest orientation from VIO output
+    std::shared_ptr<const spectacularAI::VioOutput> localVioOutput;
+    int localCameraId;
+    {
+        std::lock_guard<std::mutex> lock(g_vioOutputMutex);
+        localVioOutput = g_vioOutput;
+        localCameraId = g_cameraId;
+    }
+
+    double l_x = r_x, l_y = r_y, l_z = r_z, l_w = r_w; // Default to no change
+    if (localVioOutput) {
+        VioOutputWrapper tempWrapper(localVioOutput);
+        spectacularAI::CameraPose* cameraPose = sai_vio_output_get_camera_pose(&tempWrapper, localCameraId);
+        if (cameraPose) {
+            spectacularAI::Quaternion q = cameraPose->pose.orientation;
+            l_x = q.x;
+            l_y = q.y;
+            l_z = q.z;
+            l_w = q.w;
+            sai_camera_pose_release(cameraPose);
+        }
+    }
+
+    // --- New approach: Calculate delta rotation in rendered camera's local space ---
+    // This avoids gimbal lock issues and heading-dependent rotation axes.
+
+    // Create Eigen quaternions (w, x, y, z)
+    Eigen::Quaterniond q_rendered(r_w, r_x, r_y, r_z);
+    Eigen::Quaterniond q_latest(l_w, l_x, l_y, l_z);
+    q_rendered.normalize();
+    q_latest.normalize();
+
+    // Calculate the delta rotation in the rendered camera's local frame.
+    // This gives us the rotation from the rendered orientation to the latest one.
+    Eigen::Quaterniond q_delta_local = q_rendered.inverse() * q_latest;
+    q_delta_local.normalize();
+
+    // Convert the local delta quaternion to Euler angles (yaw, pitch, roll).
+    // These angles represent rotations around the camera's local axes,
+    // which is what we need for the 2D reprojection effect.
+    double yaw_angle, pitch_angle, roll_angle_rad;
+    quaternionToEuler(q_delta_local.x(), q_delta_local.y(), q_delta_local.z(), q_delta_local.w(),
+                      yaw_angle, pitch_angle, roll_angle_rad);
+
+    // --- Apply transformations based on calculated angles ---
+    float depth = g_renderedDepth.load();
+
+    // Apply inverse transformations. Parallax effect for translation is scaled by depth.
+    // The signs are chosen to match the visual effect of camera rotation.
+    float translateX = -yaw_angle * depth;   // Yaw (Y-rot) -> X translation
+    float translateY = -pitch_angle * depth; // Pitch (X-rot) -> Y translation
+    float rollAngle  = roll_angle_rad * 3.0f; // Roll (Z-rot) -> 2D rotation
+
+    // Create a transformation matrix with translation and roll rotation
+    float cosRoll = cos(rollAngle);
+    float sinRoll = sin(rollAngle);
+
+    // Column-major matrix for OpenGL, corrected for aspect ratio
+    float finalMVP[16] = {
+        cosRoll,          sinRoll * aspect, 0.0f, 0.0f,
+       -sinRoll / aspect, cosRoll,          0.0f, 0.0f,
+        0.0f,             0.0f,             1.0f, 0.0f,
+        translateX,       translateY,       0.0f, 1.0f
+    };
+    
+    // Debug output occasionally
+    // static int debugCounter = 0;
+    // if (++debugCounter % 30 == 0) { // Every ~30 frames
+    //     std::cout << "[Reproject] Euler (deg): Yaw=" << (yaw_angle * 180.0/3.14159)
+    //               << ", Pitch=" << (pitch_angle * 180.0/3.14159)
+    //               << ", Roll=" << (roll_angle_rad * 180.0/3.14159) << std::endl;
+    //     std::cout << "[Reproject] Transform: X=" << translateX << " Y=" << translateY << " Roll=" << (rollAngle * 180.0f / 3.14159265f) << " deg" << std::endl;
+    // }
+
+    // Modern OpenGL Core profile rendering
+    glUseProgram(gShader);
+    glUniformMatrix4fv(gMVPUniform, 1, GL_FALSE, finalMVP);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, texId);
+    glUniform1i(gTexUniform, 0);
+    glBindVertexArray(gQuadVAO);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glBindVertexArray(0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(0);
+    err = glGetError();
+    if (err != GL_NO_ERROR) {
+        std::cerr << "[OnRenderEvent] OpenGL error after rendering: 0x" << std::hex << err << std::dec << std::endl;
+    }
+}
+
+extern "C" {
+
+EXPORT_API void sai_set_rendered_orientation(double x, double y, double z, double w) {
+    std::lock_guard<std::mutex> lock(g_orientationMutex);
+    g_orientation_rendered[0] = x;
+    g_orientation_rendered[1] = y;
+    g_orientation_rendered[2] = z;
+    g_orientation_rendered[3] = w;
+}
+
+EXPORT_API void sai_set_vio_output_handle(VioOutputWrapper* vioOutputHandle, int cameraId) {
+    std::lock_guard<std::mutex> lock(g_vioOutputMutex);
+    if (vioOutputHandle) {
+        g_vioOutput = vioOutputHandle->getHandle();
+    } else {
+        g_vioOutput.reset();
+    }
+    g_cameraId = cameraId;
+}
+
+EXPORT_API void sai_set_rendered_texture(uint32_t textureId) {
+    g_renderedTextureId = textureId;
+}
+
+EXPORT_API void sai_set_rendered_depth(float depth) {
+    g_renderedDepth = depth;
+}
+
+// Plugin event for orientation reprojection
+EXPORT_API void* GetRenderEventFunc() {
+    return (void*)OnRenderEvent;
+}
+
+EXPORT_API void sai_reprojection_plugin_event(int /*eventId*/) {
+    // Deprecated: do nothing, C# should use GL.IssuePluginEvent(GetRenderEventFunc(), eventId)
+}
+
+} // extern "C"
+
+// All state is set via atomic globals from C# before issuing the plugin event.
+// No need for event IDs if only one action is performed per event.
+// Thread safety is ensured by std::atomic and std::mutex for orientation.
+// The plugin event reads the latest state set by C#.
