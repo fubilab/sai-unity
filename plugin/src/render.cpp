@@ -271,8 +271,8 @@ static void UNITY_INTERFACE_API OnRenderEvent(int /*eventId*/) {
     q_rendered.normalize();
     q_latest.normalize();
 
-    // Calculate the delta rotation in the rendered camera's local frame.
-    Eigen::Quaterniond q_delta_local = q_rendered.inverse() * q_latest;
+    // Calculate the delta rotation from the rendered to the latest orientation
+    Eigen::Quaterniond q_delta_local = q_latest.inverse() * q_rendered;
     q_delta_local.normalize();
 
     // Convert delta quaternion to 4x4 matrix (for view-space rotation)

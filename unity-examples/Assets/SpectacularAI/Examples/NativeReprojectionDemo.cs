@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 using UnityEngine;
+using SpectacularAI;
 using SpectacularAI.DepthAI;
 using SpectacularAI.Native;
 using UnityEngine.Rendering;
@@ -47,6 +48,8 @@ public class NativeReprojectionDemo : MonoBehaviour
   public int CameraId = 0;
   private UnityEngine.Camera _camera;
   private RenderTexture _offscreenRT;
+  private bool _reprojectionEnabled = true;
+  private bool _reprojectionFrozen = false;
 
   void Awake()
   {
@@ -58,9 +61,11 @@ public class NativeReprojectionDemo : MonoBehaviour
     if (_camera == null)
       _camera = UnityEngine.Camera.main;
     if (_camera == null)
+    {
       Debug.LogError("NativeReprojectionDemo: No Camera found!");
-    else
-      _camera.depthTextureMode = DepthTextureMode.Depth;
+      return;
+    }
+    _camera.depthTextureMode = DepthTextureMode.Depth;
     #endif
   }
 
@@ -76,23 +81,29 @@ public class NativeReprojectionDemo : MonoBehaviour
 
   void OnEndCameraRendering(ScriptableRenderContext ctx, UnityEngine.Camera cam)
   {
+    if (!_reprojectionEnabled) return;
+
     if (cam.cameraType != CameraType.Game) return;
     var target = cam.activeTexture ?? (RenderTexture)cam.targetTexture;
     if (target == null) return;
-    var texPtr = target.GetNativeTexturePtr();
-    if (texPtr != IntPtr.Zero)
-    {
-      NativeReprojection.sai_set_rendered_texture((uint)texPtr.ToInt64());
-    }
 
-    var depthTexture = Shader.GetGlobalTexture("_CameraDepthTexture");
-    if (depthTexture != null)
+    if (!_reprojectionFrozen)
     {
+      var texPtr = target.GetNativeTexturePtr();
+      if (texPtr != IntPtr.Zero)
+      {
+        NativeReprojection.sai_set_rendered_texture((uint)texPtr.ToInt64());
+      }
+
+      var depthTexture = Shader.GetGlobalTexture("_CameraDepthTexture");
+      if (depthTexture != null)
+      {
         var depthTexPtr = depthTexture.GetNativeTexturePtr();
         if (depthTexPtr != IntPtr.Zero)
         {
-            NativeReprojection.sai_set_rendered_depth_texture((uint)depthTexPtr.ToInt64());
+          NativeReprojection.sai_set_rendered_depth_texture((uint)depthTexPtr.ToInt64());
         }
+      }
     }
 
     var vioHandle = Vio.Output?.GetNativeHandle();
@@ -135,10 +146,48 @@ public class NativeReprojectionDemo : MonoBehaviour
     }
   }
 
+  void Update()
+  {
+    if (Input.GetKeyDown(KeyCode.R))
+    {
+      _reprojectionEnabled = !_reprojectionEnabled;
+      if (_reprojectionEnabled)
+      {
+        _camera.targetTexture = _offscreenRT;
+      }
+      else
+      {
+        _camera.targetTexture = null;
+      }
+    }
+
+    if (Input.GetKeyDown(KeyCode.D))
+    {
+      _reprojectionFrozen = !_reprojectionFrozen;
+    }
+    PoseProvider.FrozenMode = _reprojectionFrozen; // Disable camera rendering if frozen
+  }
+
+  void OnGUI()
+  {
+      #if UNITY_EDITOR
+      if (!enabled)
+      {
+          GUI.Box(new Rect(10, 10, 400, 60), "");
+          GUI.Label(new Rect(15, 15, 390, 20), "NativeReprojectionDemo: DISABLED IN EDITOR");
+          GUI.Label(new Rect(15, 35, 390, 20), "Native rendering only works in builds.");
+          return;
+      }
+      #endif
+      
+      GUI.Label(new Rect(10, 10, 300, 20), $"Reprojection (R): {(_reprojectionEnabled ? "ON" : "OFF")}");
+      GUI.Label(new Rect(10, 30, 300, 20), $"Freeze view (D): {(_reprojectionFrozen ? "ON" : "OFF")}");
+  }
+
   void LateUpdate()
   {
-    if (Vio.Output is null)
-      return; // No VIO output, nothing to update
+    if (Vio.Output is null || _reprojectionFrozen)
+      return; // No VIO output or frozen, nothing to update
     var unityQuat = Vio.Output.Pose._orientation;
     NativeReprojection.sai_set_rendered_orientation(unityQuat.x, unityQuat.y, unityQuat.z, unityQuat.w);
   }
