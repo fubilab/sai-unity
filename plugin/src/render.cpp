@@ -275,9 +275,16 @@ static void UNITY_INTERFACE_API OnRenderEvent(int /*eventId*/) {
     Eigen::Quaterniond q_delta_local = q_latest.inverse() * q_rendered;
     q_delta_local.normalize();
 
+    // HACK: Invert pitch component of rotation.
+    // This is likely due to a mismatch in coordinate system conventions (e.g. VIO vs Unity's view space).
+    // Flipping the sign of the quaternion's x component effectively inverts pitch (X-axis rotation)
+    // while leaving roll (Z-axis rotation) and yaw (Y-axis rotation) intact.
+    q_delta_local.x() *= -1;
+
     // Convert delta quaternion to 4x4 matrix (for view-space rotation)
     Eigen::Matrix4d reprojection_matrix_d = Eigen::Matrix4d::Identity();
     reprojection_matrix_d.block<3,3>(0,0) = q_delta_local.toRotationMatrix();
+
     Eigen::Matrix4f reprojection_matrix_f = reprojection_matrix_d.cast<float>();
 
     // Get projection matrix and its inverse
