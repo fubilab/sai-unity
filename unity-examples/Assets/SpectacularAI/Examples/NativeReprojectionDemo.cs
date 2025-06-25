@@ -133,6 +133,8 @@ public class NativeReprojectionDemo : MonoBehaviour
           projColMajor[col * 4 + row] = proj[row, col];
       NativeReprojection.sai_set_rendered_projection(projColMajor);
     }
+
+    fpsTimeLeft = fpsUpdateInterval;
   }
 
   void OnDestroy()
@@ -166,6 +168,18 @@ public class NativeReprojectionDemo : MonoBehaviour
       _reprojectionFrozen = !_reprojectionFrozen;
     }
     PoseProvider.FrozenMode = _reprojectionFrozen; // Disable camera rendering if frozen
+
+    // FPS calculation
+    fpsTimeLeft -= Time.deltaTime;
+    fpsAccum += Time.timeScale / Time.deltaTime;
+    ++fpsFrames;
+    if (fpsTimeLeft <= 0f)
+    {
+      fps = fpsAccum / fpsFrames;
+      fpsTimeLeft = fpsUpdateInterval;
+      fpsAccum = 0f;
+      fpsFrames = 0;
+    }
   }
 
   void OnGUI()
@@ -182,7 +196,16 @@ public class NativeReprojectionDemo : MonoBehaviour
       
       GUI.Label(new Rect(10, 10, 300, 20), $"Reprojection (R): {(_reprojectionEnabled ? "ON" : "OFF")}");
       GUI.Label(new Rect(10, 30, 300, 20), $"Freeze view (D): {(_reprojectionFrozen ? "ON" : "OFF")}");
+      // FPS display
+      GUI.Label(new Rect(10, 50, 300, 20), $"FPS: {fps:F1}");
   }
+
+  // FPS calculation fields
+  private float fps = 0f;
+  private float fpsUpdateInterval = 0.5f;
+  private float fpsAccum = 0f;
+  private int fpsFrames = 0;
+  private float fpsTimeLeft = 0f;
 
   void LateUpdate()
   {
