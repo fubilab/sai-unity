@@ -21,8 +21,8 @@ static std::shared_ptr<const spectacularAI::VioOutput> g_vioOutput;
 static int g_cameraId{0};
 static std::mutex g_orientationMutex;
 static std::atomic<uint32_t> g_renderedTextureId{0};
+static std::atomic<uint32_t> g_renderedDepthTextureId{0};
 static std::atomic<double> g_orientation_rendered[4];
-static std::atomic<float> g_renderedDepth{1.0f};
 
 struct OrientationInit {
     OrientationInit() {
@@ -37,17 +37,17 @@ static OrientationInit orientationInit;
 // --- Modern OpenGL Core profile quad rendering ---
 namespace {
 GLuint gQuadVAO = 0, gQuadVBO = 0, gShader = 0;
-GLint gMVPUniform = -1, gTexUniform = -1;
+GLint gTexUniform = -1, gDepthTexUniform = -1;
+GLint gProjMatrixUniform = -1, gInvProjMatrixUniform = -1, gReprojMatrixUniform = -1;
 
 const char* quadVert = R"(
 #version 330 core
 layout(location = 0) in vec2 aPos;
 layout(location = 1) in vec2 aUV;
-uniform mat4 uMVP;
 out vec2 vUV;
 void main() {
     vUV = aUV;
-    gl_Position = uMVP * vec4(aPos, 0.0, 1.0);
+    gl_Position = vec4(aPos, 0.0, 1.0);
 }
 )";
 
@@ -56,8 +56,39 @@ const char* quadFrag = R"(
 in vec2 vUV;
 out vec4 FragColor;
 uniform sampler2D uTex;
+uniform sampler2D uDepthTex;
+
+uniform mat4 uProjectionMatrix;
+uniform mat4 uInvProjectionMatrix;
+uniform mat4 uReprojectionMatrix;
+
 void main() {
-    FragColor = texture(uTex, vUV);
+    float raw_depth = texture(uDepthTex, vUV).r;
+
+    // Unproject from screen space (uv, depth) to view space
+    vec4 clip_pos;
+    clip_pos.xy = vUV * 2.0 - 1.0;
+    clip_pos.z = raw_depth * 2.0 - 1.0; // Convert depth from [0,1] to NDC [-1,1]
+    clip_pos.w = 1.0;
+
+    vec4 view_pos = uInvProjectionMatrix * clip_pos;
+    view_pos /= view_pos.w;
+
+    // Apply delta rotation in view space
+    vec4 reproj_view_pos = uReprojectionMatrix * view_pos;
+
+    // Project back to clip space
+    vec4 reproj_clip_pos = uProjectionMatrix * reproj_view_pos;
+    reproj_clip_pos /= reproj_clip_pos.w;
+
+    // Convert to UV coordinates
+    vec2 reproj_uv = reproj_clip_pos.xy * 0.5 + 0.5;
+
+    if (reproj_uv.x < 0.0 || reproj_uv.x > 1.0 || reproj_uv.y < 0.0 || reproj_uv.y > 1.0) {
+        FragColor = vec4(0.0, 0.0, 0.0, 1.0); // Black for pixels outside original view
+    } else {
+        FragColor = texture(uTex, reproj_uv);
+    }
 }
 )";
 
@@ -123,42 +154,14 @@ void ensureQuadResources() {
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
     gShader = createShaderProgram(quadVert, quadFrag);
-    gMVPUniform = glGetUniformLocation(gShader, "uMVP");
     gTexUniform = glGetUniformLocation(gShader, "uTex");
+    gDepthTexUniform = glGetUniformLocation(gShader, "uDepthTex");
+    gProjMatrixUniform = glGetUniformLocation(gShader, "uProjectionMatrix");
+    gInvProjMatrixUniform = glGetUniformLocation(gShader, "uInvProjectionMatrix");
+    gReprojMatrixUniform = glGetUniformLocation(gShader, "uReprojectionMatrix");
 }
 }
 // --- End modern OpenGL helpers ---
-
-// Helper to convert quaternion to Euler angles by transforming basis vectors
-static void quaternionToEuler(double qx, double qy, double qz, double qw, double& yaw, double& pitch, double& roll) {
-    // Get yaw and pitch from the direction of the transformed forward vector (0,0,1)
-    const double fwd_x = 2.0 * (qx * qz + qw * qy);
-    const double fwd_y = 2.0 * (qy * qz - qw * qx);
-    const double fwd_z = 1.0 - 2.0 * (qx * qx + qy * qy);
-
-    // Get roll from the orientation of the transformed right vector (1,0,0)
-    const double right_x = 1.0 - 2.0 * (qy * qy + qz * qz);
-    const double right_y = 2.0 * (qx * qy + qw * qz);
-
-    // Calculate angles from the transformed vectors
-    yaw   = atan2(fwd_x, fwd_z);
-    
-    double sin_pitch = -fwd_y;
-    if (sin_pitch > 1.0) sin_pitch = 1.0;
-    if (sin_pitch < -1.0) sin_pitch = -1.0;
-    pitch = asin(sin_pitch);
-    
-    roll = atan2(right_y, right_x);
-}
-
-// Helper to normalize angle difference to [-PI, PI]
-// Currently unused but kept for potential future use
-// static double normalizeAngleDifference(double diff) {
-//     const double PI = 3.14159265358979323846;
-//     while (diff <= -PI) diff += 2 * PI;
-//     while (diff > PI) diff -= 2 * PI;
-//     return diff;
-// }
 
 static IUnityInterfaces* s_UnityInterfaces = nullptr;
 static IUnityGraphics* s_UnityGraphics = nullptr;
@@ -208,12 +211,11 @@ static void UNITY_INTERFACE_API OnRenderEvent(int /*eventId*/) {
     // Bind default framebuffer to ensure drawing to Unity's backbuffer
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     uint32_t texId = g_renderedTextureId.load();
-    if (texId == 0) {
-        std::cerr << "[OnRenderEvent] No valid texture ID set, skipping render." << std::endl;
+    uint32_t depthTexId = g_renderedDepthTextureId.load();
+    if (texId == 0 || depthTexId == 0) {
         return;
     }
-    if (!glIsTexture(texId)) {
-        std::cerr << "[OnRenderEvent] Texture ID " << texId << " is not a valid GL texture, skipping render." << std::endl;
+    if (!glIsTexture(texId) || !glIsTexture(depthTexId)) {
         return;
     }
     int width = 0, height = 0;
@@ -222,16 +224,12 @@ static void UNITY_INTERFACE_API OnRenderEvent(int /*eventId*/) {
     glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
     glBindTexture(GL_TEXTURE_2D, 0);
     if (width <= 0 || height <= 0) {
-        std::cerr << "[OnRenderEvent] Texture has invalid size (" << width << ", " << height << "), skipping render." << std::endl;
         return;
     }
-
-    const float aspect = (height > 0) ? (float)width / (float)height : 1.0f;
 
     glViewport(0, 0, width, height);
     GLenum err = glGetError();
     if (err != GL_NO_ERROR) {
-        std::cerr << "[OnRenderEvent] OpenGL error before rendering: 0x" << std::hex << err << std::dec << std::endl;
         return;
     }
     // Get rendered orientation
@@ -243,9 +241,6 @@ static void UNITY_INTERFACE_API OnRenderEvent(int /*eventId*/) {
         r_z = g_orientation_rendered[2];
         r_w = g_orientation_rendered[3];
     }
-
-    // std::cout << "[SAI Reprojection] Rendered orientation (from Unity): "
-    //           << r_x << ", " << r_y << ", " << r_z << ", " << r_w << std::endl;
 
     // Get latest orientation from VIO output
     std::shared_ptr<const spectacularAI::VioOutput> localVioOutput;
@@ -270,9 +265,6 @@ static void UNITY_INTERFACE_API OnRenderEvent(int /*eventId*/) {
         }
     }
 
-    // --- New approach: Calculate delta rotation in rendered camera's local space ---
-    // This avoids gimbal lock issues and heading-dependent rotation axes.
-
     // Create Eigen quaternions (w, x, y, z)
     Eigen::Quaterniond q_rendered(r_w, r_x, r_y, r_z);
     Eigen::Quaterniond q_latest(l_w, l_x, l_y, l_z);
@@ -280,59 +272,40 @@ static void UNITY_INTERFACE_API OnRenderEvent(int /*eventId*/) {
     q_latest.normalize();
 
     // Calculate the delta rotation in the rendered camera's local frame.
-    // This gives us the rotation from the rendered orientation to the latest one.
     Eigen::Quaterniond q_delta_local = q_rendered.inverse() * q_latest;
     q_delta_local.normalize();
 
-    // Convert the local delta quaternion to Euler angles (yaw, pitch, roll).
-    // These angles represent rotations around the camera's local axes,
-    // which is what we need for the 2D reprojection effect.
-    double yaw_angle, pitch_angle, roll_angle_rad;
-    quaternionToEuler(q_delta_local.x(), q_delta_local.y(), q_delta_local.z(), q_delta_local.w(),
-                      yaw_angle, pitch_angle, roll_angle_rad);
+    // Convert delta quaternion to 4x4 matrix (for view-space rotation)
+    Eigen::Matrix4d reprojection_matrix_d = Eigen::Matrix4d::Identity();
+    reprojection_matrix_d.block<3,3>(0,0) = q_delta_local.toRotationMatrix();
+    Eigen::Matrix4f reprojection_matrix_f = reprojection_matrix_d.cast<float>();
 
-    // --- Apply transformations based on calculated angles ---
-    float depth = g_renderedDepth.load();
-
-    // --- Use Unity projection matrix for translation scaling ---
-    float tanHalfFovY = 1.0f / g_renderedProjection[5];
-    // Use the aspect ratio already defined above
-    // Parallax effect: closer objects move more (inverse depth)
-    float invDepth = 1.0f / depth;
-    float translateX = -tan(yaw_angle) * invDepth / (tanHalfFovY * aspect);
-    float translateY = -tan(pitch_angle) * invDepth / tanHalfFovY;
-    float rollAngle  = roll_angle_rad * 1.0f; // Roll (Z-rot) -> 2D rotation
-
-    // Create a transformation matrix with translation and roll rotation
-    float cosRoll = cos(rollAngle);
-    float sinRoll = sin(rollAngle);
-
-    // Column-major matrix for OpenGL, corrected for aspect ratio
-    float finalMVP[16] = {
-        cosRoll,          sinRoll * aspect, 0.0f, 0.0f,
-       -sinRoll / aspect, cosRoll,          0.0f, 0.0f,
-        0.0f,             0.0f,             1.0f, 0.0f,
-        translateX,       translateY,       0.0f, 1.0f
-    };
-    
-    // Debug output occasionally
-    // static int debugCounter = 0;
-    // if (++debugCounter % 30 == 0) { // Every ~30 frames
-    //     std::cout << "[Reproject] Euler (deg): Yaw=" << (yaw_angle * 180.0/3.14159)
-    //               << ", Pitch=" << (pitch_angle * 180.0/3.14159)
-    //               << ", Roll=" << (roll_angle_rad * 180.0/3.14159) << std::endl;
-    //     std::cout << "[Reproject] Transform: X=" << translateX << " Y=" << translateY << " Roll=" << (rollAngle * 180.0f / 3.14159265f) << " deg" << std::endl;
-    // }
+    // Get projection matrix and its inverse
+    Eigen::Matrix4f projection_matrix;
+    memcpy(projection_matrix.data(), g_renderedProjection, 16 * sizeof(float));
+    Eigen::Matrix4f inv_projection_matrix = projection_matrix.inverse();
 
     // Modern OpenGL Core profile rendering
     glUseProgram(gShader);
-    glUniformMatrix4fv(gMVPUniform, 1, GL_FALSE, finalMVP);
+
+    glUniformMatrix4fv(gProjMatrixUniform, 1, GL_FALSE, projection_matrix.data());
+    glUniformMatrix4fv(gInvProjMatrixUniform, 1, GL_FALSE, inv_projection_matrix.data());
+    glUniformMatrix4fv(gReprojMatrixUniform, 1, GL_FALSE, reprojection_matrix_f.data());
+
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, texId);
     glUniform1i(gTexUniform, 0);
+
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, depthTexId);
+    glUniform1i(gDepthTexUniform, 1);
+
     glBindVertexArray(gQuadVAO);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, 0);
     glUseProgram(0);
     err = glGetError();
@@ -365,8 +338,8 @@ EXPORT_API void sai_set_rendered_texture(uint32_t textureId) {
     g_renderedTextureId = textureId;
 }
 
-EXPORT_API void sai_set_rendered_depth(float depth) {
-    g_renderedDepth = depth;
+EXPORT_API void sai_set_rendered_depth_texture(uint32_t textureId) {
+    g_renderedDepthTextureId = textureId;
 }
 
 // Plugin event for orientation reprojection
