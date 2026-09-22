@@ -8,6 +8,8 @@
 int main(int argc, char *argv[]) {
     ConfigurationWrapper config;
     config.lowLatency = true;
+    config.enableHandTracking = true;
+    if (argc > 1) config.handTrackingPalmModelPath = argv[1];
 
     // SLAM callback
     callback_t_mapper_output onMapperOutput = [](const MapperOutputWrapper* mapperOutput) {
@@ -22,10 +24,37 @@ int main(int argc, char *argv[]) {
     };
 
     PipelineWrapper* pipeline = sai_depthai_pipeline_build(&config, nullptr, 0, onMapperOutput);
-    spectacularAI::daiPlugin::Session* session = sai_depthai_pipeline_start_session(pipeline, nullptr);
+    SessionWrapper* session = sai_depthai_pipeline_start_session(pipeline, nullptr);
 
     int counter = 0;
+    int64_t lastColorSequence = -1;
+    int64_t lastPalmSequence = -1;
     while (counter < 1000) {
+        ColorFrameWrapper* colorFrame = sai_depthai_session_get_color_frame(session);
+        if (colorFrame != nullptr) {
+            int64_t sequence = sai_color_frame_get_sequence_number(colorFrame);
+            if (sequence != lastColorSequence) {
+                std::cout << "color frame " << sequence << " ("
+                    << sai_color_frame_get_width(colorFrame) << "x"
+                    << sai_color_frame_get_height(colorFrame) << ")" << std::endl;
+                lastColorSequence = sequence;
+            }
+            sai_color_frame_release(colorFrame);
+        }
+
+        HandTrackingOutputWrapper* handOutput =
+            sai_depthai_session_get_hand_tracking_output(session);
+        if (handOutput != nullptr) {
+            int64_t sequence = sai_hand_tracking_output_get_sequence_number(handOutput);
+            if (sequence != lastPalmSequence) {
+                std::cout << "palm output " << sequence << " ("
+                    << sai_hand_tracking_output_get_count(handOutput)
+                    << " detections)" << std::endl;
+                lastPalmSequence = sequence;
+            }
+            sai_hand_tracking_output_release(handOutput);
+        }
+
         if (sai_depthai_session_has_output(session)) {
             ++counter;
             VioOutputWrapper* output = sai_depthai_session_get_output(session);

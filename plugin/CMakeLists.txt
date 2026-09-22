@@ -18,6 +18,7 @@ set(PLUGIN_SRC
   src/util.cpp
   src/depthai.cpp
   src/mapping.cpp
+  src/hand_tracking.cpp
 )
 
 set(PLUGIN_LIBS
@@ -49,6 +50,11 @@ target_include_directories(main_replay PRIVATE "include/spectacularAI/unity")
 add_executable(main_depthai ${PLUGIN_SRC} examples/main_depthai.cpp)
 target_link_libraries(main_depthai PRIVATE ${PLUGIN_LIBS})
 target_include_directories(main_depthai PRIVATE "include/spectacularAI/unity")
+
+# Native hand-tracking decoder test
+add_executable(main_hand_tracking ${PLUGIN_SRC} examples/main_hand_tracking.cpp)
+target_link_libraries(main_hand_tracking PRIVATE ${PLUGIN_LIBS})
+target_include_directories(main_hand_tracking PRIVATE "include/spectacularAI/unity")
 
 if(MSVC)
   add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
