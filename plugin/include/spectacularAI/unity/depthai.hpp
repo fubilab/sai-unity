@@ -123,7 +123,8 @@ extern "C"
         ConfigurationWrapper* configuration,
         const char** internalParameters,
         int internalParametersCount,
-        callback_t_mapper_output onMapperOutput);
+        callback_t_mapper_output onMapperOutput,
+        char* errorMsg);
     EXPORT_API SessionWrapper* sai_depthai_pipeline_start_session(PipelineWrapper* pipelineHandle, char* errorMsg);
     EXPORT_API void sai_depthai_pipeline_release(PipelineWrapper* pipelineHandle);
 

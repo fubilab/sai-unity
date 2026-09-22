@@ -46,50 +46,65 @@ PipelineWrapper* sai_depthai_pipeline_build(
         ConfigurationWrapper* configuration,
         const char** internalParameters,
         int internalParametersCount,
-        callback_t_mapper_output onMapperOutput) {
-    std::shared_ptr<dai::Pipeline> pipeline = std::make_shared<dai::Pipeline>();
-    std::shared_ptr<ColorFrameQueue> colorFrames = std::make_shared<ColorFrameQueue>();
+        callback_t_mapper_output onMapperOutput,
+        char* errorMsg) {
+    try {
+        std::shared_ptr<dai::Pipeline> pipeline = std::make_shared<dai::Pipeline>();
+        std::shared_ptr<ColorFrameQueue> colorFrames = std::make_shared<ColorFrameQueue>();
 
-    spectacularAI::daiPlugin::Configuration config;
-    create_configuration(*configuration, internalParameters, internalParametersCount, config);
+        spectacularAI::daiPlugin::Configuration config;
+        create_configuration(*configuration, internalParameters, internalParametersCount, config);
 
-    std::shared_ptr<spectacularAI::daiPlugin::Pipeline> handle = onMapperOutput ?
-        std::make_shared<spectacularAI::daiPlugin::Pipeline>(*pipeline, config,
-            [onMapperOutput](spectacularAI::mapping::MapperOutputPtr mapperOutput) {
-                onMapperOutput(new MapperOutputWrapper(mapperOutput));
-            })
-        : std::make_shared<spectacularAI::daiPlugin::Pipeline>(*pipeline, config);
-    if (configuration->enableHandTracking) {
-        handle->color->setInterleaved(false);
-        handle->hooks.color = [colorFrames](std::shared_ptr<dai::ImgFrame> frame) {
-            colorFrames->push(frame);
-        };
+        std::shared_ptr<spectacularAI::daiPlugin::Pipeline> handle = onMapperOutput ?
+            std::make_shared<spectacularAI::daiPlugin::Pipeline>(*pipeline, config,
+                [onMapperOutput](spectacularAI::mapping::MapperOutputPtr mapperOutput) {
+                    onMapperOutput(new MapperOutputWrapper(mapperOutput));
+                })
+            : std::make_shared<spectacularAI::daiPlugin::Pipeline>(*pipeline, config);
+        if (configuration->enableHandTracking) {
+            handle->color->setInterleaved(false);
+            handle->hooks.color = [colorFrames](std::shared_ptr<dai::ImgFrame> frame) {
+                colorFrames->push(frame);
+            };
+        }
+
+        bool handTrackingPipelineEnabled = configuration->enableHandTracking &&
+            configuration->handTrackingPalmModelPath != nullptr &&
+            configuration->handTrackingPalmModelPath[0] != '\0';
+        if (handTrackingPipelineEnabled) {
+            auto palmInput = pipeline->create<dai::node::ImageManip>();
+            palmInput->initialConfig.setResize(128, 128);
+            palmInput->setMaxOutputFrameSize(128 * 128 * 3);
+            handle->color->preview.link(palmInput->inputImage);
+
+            auto palmNetwork = pipeline->create<dai::node::NeuralNetwork>();
+            palmNetwork->setBlobPath(configuration->handTrackingPalmModelPath);
+            palmInput->out.link(palmNetwork->input);
+
+            auto palmOutput = pipeline->create<dai::node::XLinkOut>();
+            palmOutput->setStreamName("sai_hand_palm");
+            palmOutput->input.setBlocking(false);
+            palmOutput->input.setQueueSize(1);
+            palmNetwork->out.link(palmOutput->input);
+        }
+
+        std::shared_ptr<dai::Device> device = std::make_shared<dai::Device>(*pipeline);
+        std::shared_ptr<dai::DataOutputQueue> handTrackingOutput = handTrackingPipelineEnabled ?
+            device->getOutputQueue("sai_hand_palm", 1, false) : nullptr;
+        return new PipelineWrapper(handle, pipeline, device, colorFrames, handTrackingOutput);
+    } catch (const std::exception &e) {
+        if (errorMsg != nullptr) {
+            strncpy(errorMsg, e.what(), 1000 - 1);
+            errorMsg[1000 - 1] = '\0';
+        }
+    } catch (...) {
+        if (errorMsg != nullptr) {
+            strncpy(errorMsg, "Unknown native exception while building the DepthAI pipeline.", 1000 - 1);
+            errorMsg[1000 - 1] = '\0';
+        }
     }
 
-    bool handTrackingPipelineEnabled = configuration->enableHandTracking &&
-        configuration->handTrackingPalmModelPath != nullptr &&
-        configuration->handTrackingPalmModelPath[0] != '\0';
-    if (handTrackingPipelineEnabled) {
-        auto palmInput = pipeline->create<dai::node::ImageManip>();
-        palmInput->initialConfig.setResize(128, 128);
-        palmInput->setMaxOutputFrameSize(128 * 128 * 3);
-        handle->color->preview.link(palmInput->inputImage);
-
-        auto palmNetwork = pipeline->create<dai::node::NeuralNetwork>();
-        palmNetwork->setBlobPath(configuration->handTrackingPalmModelPath);
-        palmInput->out.link(palmNetwork->input);
-
-        auto palmOutput = pipeline->create<dai::node::XLinkOut>();
-        palmOutput->setStreamName("sai_hand_palm");
-        palmOutput->input.setBlocking(false);
-        palmOutput->input.setQueueSize(1);
-        palmNetwork->out.link(palmOutput->input);
-    }
-
-    std::shared_ptr<dai::Device> device = std::make_shared<dai::Device>(*pipeline);
-    std::shared_ptr<dai::DataOutputQueue> handTrackingOutput = handTrackingPipelineEnabled ?
-        device->getOutputQueue("sai_hand_palm", 1, false) : nullptr;
-    return new PipelineWrapper(handle, pipeline, device, colorFrames, handTrackingOutput);
+    return nullptr;
 }
 
 SessionWrapper* sai_depthai_pipeline_start_session(PipelineWrapper* pipelineHandle, char* errorMsg) {
@@ -99,13 +114,19 @@ SessionWrapper* sai_depthai_pipeline_start_session(PipelineWrapper* pipelineHand
             pipelineHandle->getHandle()->startSession(*pipelineHandle->getDevice()),
             pipelineHandle->getColorFrames(),
             pipelineHandle->getHandTrackingOutput());
-    } catch(const std::runtime_error &e) {
+    } catch(const std::exception &e) {
         if (errorMsg != nullptr) {
             strncpy(errorMsg, e.what(), 1000 - 1);
             errorMsg[1000 - 1] = '\0'; // Ensure null-termination
         } else {
-            throw e;
+            return nullptr;
         }
+    } catch (...) {
+        if (errorMsg != nullptr) {
+            strncpy(errorMsg, "Unknown native exception while starting the DepthAI session.", 1000 - 1);
+            errorMsg[1000 - 1] = '\0';
+        }
+        return nullptr;
     }
 
     return nullptr;
