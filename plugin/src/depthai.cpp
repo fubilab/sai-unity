@@ -61,11 +61,17 @@ PipelineWrapper* sai_depthai_pipeline_build(
                     onMapperOutput(new MapperOutputWrapper(mapperOutput));
                 })
             : std::make_shared<spectacularAI::daiPlugin::Pipeline>(*pipeline, config);
-        if (configuration->enableHandTracking) {
+        if (configuration->useColor || configuration->enableHandTracking) {
             handle->color->setInterleaved(false);
             handle->hooks.color = [colorFrames](std::shared_ptr<dai::ImgFrame> frame) {
                 colorFrames->push(frame);
             };
+
+            auto colorOutputNode = pipeline->create<dai::node::XLinkOut>();
+            colorOutputNode->setStreamName("sai_color");
+            colorOutputNode->input.setBlocking(false);
+            colorOutputNode->input.setQueueSize(1);
+            handle->color->preview.link(colorOutputNode->input);
         }
 
         bool handTrackingPipelineEnabled = configuration->enableHandTracking &&
@@ -89,9 +95,13 @@ PipelineWrapper* sai_depthai_pipeline_build(
         }
 
         std::shared_ptr<dai::Device> device = std::make_shared<dai::Device>(*pipeline);
+        std::shared_ptr<dai::DataOutputQueue> colorOutput =
+            (configuration->useColor || configuration->enableHandTracking) ?
+            device->getOutputQueue("sai_color", 1, false) : nullptr;
         std::shared_ptr<dai::DataOutputQueue> handTrackingOutput = handTrackingPipelineEnabled ?
             device->getOutputQueue("sai_hand_palm", 1, false) : nullptr;
-        return new PipelineWrapper(handle, pipeline, device, colorFrames, handTrackingOutput);
+        return new PipelineWrapper(
+            handle, pipeline, device, colorFrames, colorOutput, handTrackingOutput);
     } catch (const std::exception &e) {
         if (errorMsg != nullptr) {
             strncpy(errorMsg, e.what(), 1000 - 1);
@@ -113,6 +123,7 @@ SessionWrapper* sai_depthai_pipeline_start_session(PipelineWrapper* pipelineHand
         return new SessionWrapper(
             pipelineHandle->getHandle()->startSession(*pipelineHandle->getDevice()),
             pipelineHandle->getColorFrames(),
+            pipelineHandle->getColorOutput(),
             pipelineHandle->getHandTrackingOutput());
     } catch(const std::exception &e) {
         if (errorMsg != nullptr) {
@@ -153,6 +164,14 @@ VioOutputWrapper* sai_depthai_session_wait_for_output(SessionWrapper* sessionHan
 
 ColorFrameWrapper* sai_depthai_session_get_color_frame(const SessionWrapper* sessionHandle) {
     assert(sessionHandle);
+    if (const auto colorOutput = sessionHandle->getColorOutput()) {
+        std::shared_ptr<dai::ImgFrame> frame;
+        while (auto nextFrame = colorOutput->tryGet<dai::ImgFrame>()) {
+            frame = nextFrame;
+        }
+        if (frame) sessionHandle->getColorFrames()->push(frame);
+    }
+
     std::shared_ptr<dai::ImgFrame> frame = sessionHandle->getColorFrames()->getLatest();
     return frame ? new ColorFrameWrapper(frame) : nullptr;
 }

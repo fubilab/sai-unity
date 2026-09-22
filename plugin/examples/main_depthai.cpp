@@ -4,12 +4,12 @@
 #include <iostream>
 #include <sstream>
 #include <vector>
+#include <array>
 
 int main(int argc, char *argv[]) {
     ConfigurationWrapper config;
     config.lowLatency = true;
-    config.enableHandTracking = true;
-    if (argc > 1) config.handTrackingPalmModelPath = argv[1];
+    config.useColor = true;
 
     // SLAM callback
     callback_t_mapper_output onMapperOutput = [](const MapperOutputWrapper* mapperOutput) {
@@ -23,8 +23,22 @@ int main(int argc, char *argv[]) {
         sai_mapper_output_release(mapperOutput); // must release memory!
     };
 
-    PipelineWrapper* pipeline = sai_depthai_pipeline_build(&config, nullptr, 0, onMapperOutput);
-    SessionWrapper* session = sai_depthai_pipeline_start_session(pipeline, nullptr);
+    std::array<char, 1000> errorMessage{};
+    PipelineWrapper* pipeline = sai_depthai_pipeline_build(
+        &config, nullptr, 0, onMapperOutput, errorMessage.data());
+    if (!pipeline) {
+        std::cerr << "Pipeline build failed: " << errorMessage.data() << std::endl;
+        return 1;
+    }
+
+    errorMessage.fill('\0');
+    SessionWrapper* session = sai_depthai_pipeline_start_session(
+        pipeline, errorMessage.data());
+    if (!session) {
+        std::cerr << "Session start failed: " << errorMessage.data() << std::endl;
+        sai_depthai_pipeline_release(pipeline);
+        return 1;
+    }
 
     int counter = 0;
     int64_t lastColorSequence = -1;

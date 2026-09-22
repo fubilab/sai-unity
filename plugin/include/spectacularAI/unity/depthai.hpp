@@ -57,12 +57,15 @@ struct PipelineWrapper {
         std::shared_ptr<dai::Pipeline> pipeline,
         std::shared_ptr<dai::Device> device,
         std::shared_ptr<ColorFrameQueue> colorFrames,
+        std::shared_ptr<dai::DataOutputQueue> colorOutput,
         std::shared_ptr<dai::DataOutputQueue> handTrackingOutput) :
         _handle(handle), _pipeline(pipeline), _device(device),
-        _colorFrames(colorFrames), _handTrackingOutput(handTrackingOutput) {};
+        _colorFrames(colorFrames), _colorOutput(colorOutput),
+        _handTrackingOutput(handTrackingOutput) {};
     const std::shared_ptr<spectacularAI::daiPlugin::Pipeline> getHandle() const { return _handle; }
     const std::shared_ptr<dai::Device> getDevice() const { return _device; }
     const std::shared_ptr<ColorFrameQueue> getColorFrames() const { return _colorFrames; }
+    const std::shared_ptr<dai::DataOutputQueue> getColorOutput() const { return _colorOutput; }
     const std::shared_ptr<dai::DataOutputQueue> getHandTrackingOutput() const { return _handTrackingOutput; }
 
 private:
@@ -70,6 +73,7 @@ private:
     const std::shared_ptr<dai::Pipeline> _pipeline;
     const std::shared_ptr<dai::Device> _device;
     const std::shared_ptr<ColorFrameQueue> _colorFrames;
+    const std::shared_ptr<dai::DataOutputQueue> _colorOutput;
     const std::shared_ptr<dai::DataOutputQueue> _handTrackingOutput;
 };
 
@@ -77,16 +81,19 @@ struct SessionWrapper {
     SessionWrapper(
         std::unique_ptr<spectacularAI::daiPlugin::Session> handle,
         std::shared_ptr<ColorFrameQueue> colorFrames,
+        std::shared_ptr<dai::DataOutputQueue> colorOutput,
         std::shared_ptr<dai::DataOutputQueue> handTrackingOutput) :
         _handle(std::move(handle)), _colorFrames(colorFrames),
-        _handTrackingOutput(handTrackingOutput) {};
+        _colorOutput(colorOutput), _handTrackingOutput(handTrackingOutput) {};
     spectacularAI::daiPlugin::Session* getHandle() const { return _handle.get(); }
     const std::shared_ptr<ColorFrameQueue> getColorFrames() const { return _colorFrames; }
+    const std::shared_ptr<dai::DataOutputQueue> getColorOutput() const { return _colorOutput; }
     const std::shared_ptr<dai::DataOutputQueue> getHandTrackingOutput() const { return _handTrackingOutput; }
 
 private:
     std::unique_ptr<spectacularAI::daiPlugin::Session> _handle;
     const std::shared_ptr<ColorFrameQueue> _colorFrames;
+    const std::shared_ptr<dai::DataOutputQueue> _colorOutput;
     const std::shared_ptr<dai::DataOutputQueue> _handTrackingOutput;
 };
 
