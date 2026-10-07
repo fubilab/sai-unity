@@ -11,10 +11,13 @@ struct PalmDetection {
     std::array<float, 14> keypoints;
     float landmarkScore = 0.0f;
     float handedness = 0.5f;
+    float rotationDegrees = 0.0f;
     std::array<float, 63> landmarks{};
     std::array<float, 63> worldLandmarks{};
+    std::array<float, 3> spatialXYZ{};
     int gesture = -1;
     bool hasLandmarks = false;
+    bool hasSpatialXYZ = false;
 };
 
 struct LandmarkRoi {

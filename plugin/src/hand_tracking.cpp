@@ -261,7 +261,7 @@ void decodeLandmark(
     const std::vector<float>& handedness,
     const std::vector<float>& landmarks,
     const std::vector<float>& worldLandmarks,
-    const LandmarkRoi&,
+    const LandmarkRoi& roi,
     float imageWidth,
     float imageHeight) {
     constexpr float landmarkInputSize = 224.0f;
@@ -269,6 +269,7 @@ void decodeLandmark(
 
     detection.landmarkScore = score[0];
     detection.handedness = handedness.empty() ? 0.5f : handedness[0];
+    detection.rotationDegrees = roi.angleDegrees;
     const auto points = calculatePythonRectPoints(detection, imageWidth, imageHeight);
     std::array<float, 63> normalizedLandmarks{};
     for (int index = 0; index < 21; ++index) {

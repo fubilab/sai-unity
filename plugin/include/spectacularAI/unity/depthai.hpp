@@ -76,14 +76,18 @@ struct PipelineWrapper {
         std::shared_ptr<dai::DataInputQueue> handTrackingPalmFrameInput,
         std::shared_ptr<dai::DataInputQueue> handTrackingLandmarkConfig,
         std::shared_ptr<dai::DataInputQueue> handTrackingLandmarkFrameInput,
-        std::shared_ptr<dai::DataOutputQueue> handTrackingLandmarkOutput) :
+        std::shared_ptr<dai::DataOutputQueue> handTrackingLandmarkOutput,
+        std::shared_ptr<dai::DataInputQueue> handTrackingSpatialConfigInput,
+        std::shared_ptr<dai::DataOutputQueue> handTrackingSpatialOutput) :
         _handle(handle), _pipeline(pipeline), _device(device),
         _colorFrames(colorFrames), _colorOutput(colorOutput),
         _handTrackingOutput(handTrackingOutput),
         _handTrackingPalmFrameInput(handTrackingPalmFrameInput),
         _handTrackingLandmarkConfig(handTrackingLandmarkConfig),
         _handTrackingLandmarkFrameInput(handTrackingLandmarkFrameInput),
-        _handTrackingLandmarkOutput(handTrackingLandmarkOutput) {};
+        _handTrackingLandmarkOutput(handTrackingLandmarkOutput),
+        _handTrackingSpatialConfigInput(handTrackingSpatialConfigInput),
+        _handTrackingSpatialOutput(handTrackingSpatialOutput) {};
     const std::shared_ptr<spectacularAI::daiPlugin::Pipeline> getHandle() const { return _handle; }
     const std::shared_ptr<dai::Device> getDevice() const { return _device; }
     const std::shared_ptr<ColorFrameQueue> getColorFrames() const { return _colorFrames; }
@@ -93,6 +97,8 @@ struct PipelineWrapper {
     const std::shared_ptr<dai::DataInputQueue> getHandTrackingLandmarkConfig() const { return _handTrackingLandmarkConfig; }
     const std::shared_ptr<dai::DataInputQueue> getHandTrackingLandmarkFrameInput() const { return _handTrackingLandmarkFrameInput; }
     const std::shared_ptr<dai::DataOutputQueue> getHandTrackingLandmarkOutput() const { return _handTrackingLandmarkOutput; }
+    const std::shared_ptr<dai::DataInputQueue> getHandTrackingSpatialConfigInput() const { return _handTrackingSpatialConfigInput; }
+    const std::shared_ptr<dai::DataOutputQueue> getHandTrackingSpatialOutput() const { return _handTrackingSpatialOutput; }
 
 private:
     const std::shared_ptr<spectacularAI::daiPlugin::Pipeline> _handle;
@@ -105,6 +111,8 @@ private:
     const std::shared_ptr<dai::DataInputQueue> _handTrackingLandmarkConfig;
     const std::shared_ptr<dai::DataInputQueue> _handTrackingLandmarkFrameInput;
     const std::shared_ptr<dai::DataOutputQueue> _handTrackingLandmarkOutput;
+    const std::shared_ptr<dai::DataInputQueue> _handTrackingSpatialConfigInput;
+    const std::shared_ptr<dai::DataOutputQueue> _handTrackingSpatialOutput;
 };
 
 struct PendingHandTrackingOutput {
@@ -123,13 +131,17 @@ struct SessionWrapper {
         std::shared_ptr<dai::DataInputQueue> handTrackingPalmFrameInput,
         std::shared_ptr<dai::DataInputQueue> handTrackingLandmarkConfig,
         std::shared_ptr<dai::DataInputQueue> handTrackingLandmarkFrameInput,
-        std::shared_ptr<dai::DataOutputQueue> handTrackingLandmarkOutput) :
+        std::shared_ptr<dai::DataOutputQueue> handTrackingLandmarkOutput,
+        std::shared_ptr<dai::DataInputQueue> handTrackingSpatialConfigInput,
+        std::shared_ptr<dai::DataOutputQueue> handTrackingSpatialOutput) :
         _handle(std::move(handle)), _colorFrames(colorFrames),
         _colorOutput(colorOutput), _handTrackingOutput(handTrackingOutput),
         _handTrackingPalmFrameInput(handTrackingPalmFrameInput),
         _handTrackingLandmarkConfig(handTrackingLandmarkConfig),
         _handTrackingLandmarkFrameInput(handTrackingLandmarkFrameInput),
-        _handTrackingLandmarkOutput(handTrackingLandmarkOutput) {};
+        _handTrackingLandmarkOutput(handTrackingLandmarkOutput),
+        _handTrackingSpatialConfigInput(handTrackingSpatialConfigInput),
+        _handTrackingSpatialOutput(handTrackingSpatialOutput) {};
     spectacularAI::daiPlugin::Session* getHandle() const { return _handle.get(); }
     const std::shared_ptr<ColorFrameQueue> getColorFrames() const { return _colorFrames; }
     const std::shared_ptr<dai::DataOutputQueue> getColorOutput() const { return _colorOutput; }
@@ -138,6 +150,8 @@ struct SessionWrapper {
     const std::shared_ptr<dai::DataInputQueue> getHandTrackingLandmarkConfig() const { return _handTrackingLandmarkConfig; }
     const std::shared_ptr<dai::DataInputQueue> getHandTrackingLandmarkFrameInput() const { return _handTrackingLandmarkFrameInput; }
     const std::shared_ptr<dai::DataOutputQueue> getHandTrackingLandmarkOutput() const { return _handTrackingLandmarkOutput; }
+    const std::shared_ptr<dai::DataInputQueue> getHandTrackingSpatialConfigInput() const { return _handTrackingSpatialConfigInput; }
+    const std::shared_ptr<dai::DataOutputQueue> getHandTrackingSpatialOutput() const { return _handTrackingSpatialOutput; }
     std::deque<PendingHandTrackingOutput>& getPendingHandTrackingOutputs() { return _pendingHandTrackingOutputs; }
     void setLatestHandTrackingOutput(
         std::vector<saiHandTracking::PalmDetection> detections,
@@ -168,6 +182,8 @@ private:
     const std::shared_ptr<dai::DataInputQueue> _handTrackingLandmarkConfig;
     const std::shared_ptr<dai::DataInputQueue> _handTrackingLandmarkFrameInput;
     const std::shared_ptr<dai::DataOutputQueue> _handTrackingLandmarkOutput;
+    const std::shared_ptr<dai::DataInputQueue> _handTrackingSpatialConfigInput;
+    const std::shared_ptr<dai::DataOutputQueue> _handTrackingSpatialOutput;
     std::deque<PendingHandTrackingOutput> _pendingHandTrackingOutputs;
     std::vector<saiHandTracking::PalmDetection> _latestHandTrackingDetections;
     int64_t _latestHandTrackingSequenceNumber = -1;
@@ -259,6 +275,16 @@ extern "C"
         const HandTrackingOutputWrapper* outputHandle,
         int detectionIndex,
         int valueIndex);
+    EXPORT_API bool sai_hand_tracking_output_has_spatial_xyz(
+        const HandTrackingOutputWrapper* outputHandle,
+        int detectionIndex);
+    EXPORT_API float sai_hand_tracking_output_get_spatial_xyz_value(
+        const HandTrackingOutputWrapper* outputHandle,
+        int detectionIndex,
+        int valueIndex);
+    EXPORT_API float sai_hand_tracking_output_get_rotation_degrees(
+        const HandTrackingOutputWrapper* outputHandle,
+        int detectionIndex);
     EXPORT_API void sai_hand_tracking_output_release(const HandTrackingOutputWrapper* outputHandle);
     EXPORT_API void sai_depthai_session_add_trigger(
         SessionWrapper* sessionHandle,

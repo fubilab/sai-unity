@@ -6,6 +6,9 @@
 #include <depthai/pipeline/datatype/ImgFrame.hpp>
 #include <depthai/pipeline/datatype/ImageManipConfig.hpp>
 #include <depthai/pipeline/datatype/NNData.hpp>
+#include <depthai/pipeline/datatype/SpatialLocationCalculatorConfig.hpp>
+#include <depthai/pipeline/datatype/SpatialLocationCalculatorData.hpp>
+#include <depthai/pipeline/node/SpatialLocationCalculator.hpp>
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -252,6 +255,37 @@ void logLandmarkInference(
         << " world_landmark_values=" << worldLandmarks.size() << std::endl;
 }
 
+dai::SpatialLocationCalculatorConfigData createWristSpatialConfig(
+        const saiHandTracking::PalmDetection& detection,
+        float imageWidth,
+        float imageHeight) {
+    const saiHandTracking::LandmarkRoi landmarkRoi =
+        saiHandTracking::calculateLandmarkRoi(detection, imageWidth, imageHeight);
+    const float squareSize = std::max(imageWidth, imageHeight);
+    const int zoneSize = std::max(
+        static_cast<int>(landmarkRoi.width * squareSize / 10.0f),
+        8);
+    const float left = std::clamp(
+        detection.landmarks[0] - static_cast<float>(zoneSize / 2) / imageWidth,
+        0.0f,
+        std::max(0.0f, 1.0f - zoneSize / imageWidth));
+    const float top = std::clamp(
+        detection.landmarks[1] - static_cast<float>(zoneSize / 2) / imageHeight,
+        0.0f,
+        std::max(0.0f, 1.0f - zoneSize / imageHeight));
+
+    dai::SpatialLocationCalculatorConfigData config;
+    config.roi = dai::Rect(
+        left,
+        top,
+        std::min(1.0f, zoneSize / imageWidth),
+        std::min(1.0f, zoneSize / imageHeight));
+    config.depthThresholds.lowerThreshold = 100;
+    config.depthThresholds.upperThreshold = 10000;
+    config.calculationAlgorithm = dai::SpatialLocationCalculatorAlgorithm::MEDIAN;
+    return config;
+}
+
 void create_configuration(
         const ConfigurationWrapper &w,
         const char** internalParameters,
@@ -322,6 +356,8 @@ PipelineWrapper* sai_depthai_pipeline_build(
         bool handLandmarkPipelineEnabled = handTrackingPipelineEnabled &&
             configuration->handTrackingLandmarkModelPath != nullptr &&
             configuration->handTrackingLandmarkModelPath[0] != '\0';
+        const bool handSpatialPipelineEnabled = handTrackingPipelineEnabled &&
+            configuration->useStereo && !configuration->useColorStereoCameras;
         if (handTrackingPipelineEnabled) {
             auto palmFrameInput = pipeline->create<dai::node::XLinkIn>();
             palmFrameInput->setStreamName("sai_hand_palm_input");
@@ -353,6 +389,34 @@ PipelineWrapper* sai_depthai_pipeline_build(
             landmarkNetwork->out.link(landmarkOutput->input);
         }
 
+        if (handSpatialPipelineEnabled) {
+            if (!handle->monoLeft || !handle->monoRight) {
+                throw std::runtime_error("Hand XYZ requires the SAI mono camera nodes.");
+            }
+
+            auto handSpatialStereo = pipeline->create<dai::node::StereoDepth>();
+            handSpatialStereo->setLeftRightCheck(true);
+            handSpatialStereo->setDepthAlign(dai::CameraBoardSocket::RGB);
+            handle->monoLeft->out.link(handSpatialStereo->left);
+            handle->monoRight->out.link(handSpatialStereo->right);
+
+            auto spatialCalculator = pipeline->create<dai::node::SpatialLocationCalculator>();
+            spatialCalculator->setWaitForConfigInput(true);
+            spatialCalculator->inputDepth.setQueueSize(1);
+            spatialCalculator->inputDepth.setBlocking(false);
+            handSpatialStereo->depth.link(spatialCalculator->inputDepth);
+
+            auto spatialConfigInput = pipeline->create<dai::node::XLinkIn>();
+            spatialConfigInput->setStreamName("sai_hand_spatial_config");
+            spatialConfigInput->out.link(spatialCalculator->inputConfig);
+
+            auto spatialOutput = pipeline->create<dai::node::XLinkOut>();
+            spatialOutput->setStreamName("sai_hand_spatial_data");
+            spatialOutput->input.setQueueSize(4);
+            spatialOutput->input.setBlocking(false);
+            spatialCalculator->out.link(spatialOutput->input);
+        }
+
         std::shared_ptr<dai::Device> device = std::make_shared<dai::Device>(*pipeline);
         std::shared_ptr<dai::DataOutputQueue> colorOutput =
             (configuration->useColor || configuration->enableHandTracking) ?
@@ -365,9 +429,14 @@ PipelineWrapper* sai_depthai_pipeline_build(
             device->getInputQueue("sai_hand_landmark_input", 4, false) : nullptr;
         std::shared_ptr<dai::DataOutputQueue> handTrackingLandmarkOutput = handLandmarkPipelineEnabled ?
             device->getOutputQueue("sai_hand_landmark", 4, false) : nullptr;
+        std::shared_ptr<dai::DataInputQueue> handTrackingSpatialConfigInput = handSpatialPipelineEnabled ?
+            device->getInputQueue("sai_hand_spatial_config", 4, false) : nullptr;
+        std::shared_ptr<dai::DataOutputQueue> handTrackingSpatialOutput = handSpatialPipelineEnabled ?
+            device->getOutputQueue("sai_hand_spatial_data", 4, false) : nullptr;
         return new PipelineWrapper(
             handle, pipeline, device, colorFrames, colorOutput, handTrackingOutput,
-            handTrackingPalmFrameInput, nullptr, handTrackingLandmarkFrameInput, handTrackingLandmarkOutput);
+            handTrackingPalmFrameInput, nullptr, handTrackingLandmarkFrameInput, handTrackingLandmarkOutput,
+            handTrackingSpatialConfigInput, handTrackingSpatialOutput);
     } catch (const std::exception &e) {
         if (errorMsg != nullptr) {
             strncpy(errorMsg, e.what(), 1000 - 1);
@@ -394,7 +463,9 @@ SessionWrapper* sai_depthai_pipeline_start_session(PipelineWrapper* pipelineHand
             pipelineHandle->getHandTrackingPalmFrameInput(),
             pipelineHandle->getHandTrackingLandmarkConfig(),
             pipelineHandle->getHandTrackingLandmarkFrameInput(),
-            pipelineHandle->getHandTrackingLandmarkOutput());
+            pipelineHandle->getHandTrackingLandmarkOutput(),
+            pipelineHandle->getHandTrackingSpatialConfigInput(),
+            pipelineHandle->getHandTrackingSpatialOutput());
     } catch(const std::exception &e) {
         if (errorMsg != nullptr) {
             strncpy(errorMsg, e.what(), 1000 - 1);
@@ -602,6 +673,36 @@ HandTrackingOutputWrapper* sai_depthai_session_get_hand_tracking_output(
                     return !detection.hasLandmarks;
                 }),
             completed.detections.end());
+        const auto spatialConfigInput = sessionHandle->getHandTrackingSpatialConfigInput();
+        const auto spatialOutputQueue = sessionHandle->getHandTrackingSpatialOutput();
+        if (!completed.detections.empty() && spatialConfigInput && spatialOutputQueue) {
+            std::vector<dai::SpatialLocationCalculatorConfigData> roiConfigs;
+            roiConfigs.reserve(completed.detections.size());
+            for (const auto& detection : completed.detections) {
+                roiConfigs.push_back(createWristSpatialConfig(detection, imageWidth, imageHeight));
+            }
+
+            dai::SpatialLocationCalculatorConfig spatialConfig;
+            spatialConfig.setROIs(std::move(roiConfigs));
+            spatialConfigInput->send(spatialConfig);
+
+            const auto spatialData = spatialOutputQueue->get<dai::SpatialLocationCalculatorData>();
+            const auto& spatialLocations = spatialData->getSpatialLocations();
+            const std::size_t spatialCount = std::min(
+                completed.detections.size(),
+                spatialLocations.size());
+            for (std::size_t index = 0; index < spatialCount; ++index) {
+                const auto& coordinates = spatialLocations[index].spatialCoordinates;
+                if (spatialLocations[index].depthAveragePixelCount == 0 || coordinates.z <= 0.0f) {
+                    continue;
+                }
+                completed.detections[index].spatialXYZ = {
+                    coordinates.x,
+                    coordinates.y,
+                    coordinates.z};
+                completed.detections[index].hasSpatialXYZ = true;
+            }
+        }
         mutableSession->setLatestHandTrackingOutput(
             completed.detections,
             completed.sequenceNumber,
@@ -690,6 +791,28 @@ float sai_hand_tracking_output_get_world_landmark_value(
         int valueIndex) {
     assert(outputHandle);
     return outputHandle->getDetections().at(detectionIndex).worldLandmarks.at(valueIndex);
+}
+
+bool sai_hand_tracking_output_has_spatial_xyz(
+        const HandTrackingOutputWrapper* outputHandle,
+        int detectionIndex) {
+    assert(outputHandle);
+    return outputHandle->getDetections().at(detectionIndex).hasSpatialXYZ;
+}
+
+float sai_hand_tracking_output_get_spatial_xyz_value(
+        const HandTrackingOutputWrapper* outputHandle,
+        int detectionIndex,
+        int valueIndex) {
+    assert(outputHandle);
+    return outputHandle->getDetections().at(detectionIndex).spatialXYZ.at(valueIndex);
+}
+
+float sai_hand_tracking_output_get_rotation_degrees(
+        const HandTrackingOutputWrapper* outputHandle,
+        int detectionIndex) {
+    assert(outputHandle);
+    return outputHandle->getDetections().at(detectionIndex).rotationDegrees;
 }
 
 void sai_hand_tracking_output_release(const HandTrackingOutputWrapper* outputHandle) {
