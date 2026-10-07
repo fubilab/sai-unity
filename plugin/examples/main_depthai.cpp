@@ -136,6 +136,15 @@ private:
         RECT clientRect{};
         GetClientRect(_window, &clientRect);
         if (!_pixels.empty() && _width > 0 && _height > 0) {
+            const int clientWidth = clientRect.right - clientRect.left;
+            const int clientHeight = clientRect.bottom - clientRect.top;
+            const float scale = std::min(
+                static_cast<float>(clientWidth) / _width,
+                static_cast<float>(clientHeight) / _height);
+            const int drawWidth = static_cast<int>(std::lround(_width * scale));
+            const int drawHeight = static_cast<int>(std::lround(_height * scale));
+            const int drawX = (clientWidth - drawWidth) / 2;
+            const int drawY = (clientHeight - drawHeight) / 2;
             BITMAPINFO bitmapInfo{};
             bitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
             bitmapInfo.bmiHeader.biWidth = _width;
@@ -145,10 +154,10 @@ private:
             bitmapInfo.bmiHeader.biCompression = BI_RGB;
             StretchDIBits(
                 context,
-                0,
-                0,
-                clientRect.right,
-                clientRect.bottom,
+                drawX,
+                drawY,
+                drawWidth,
+                drawHeight,
                 0,
                 0,
                 _width,

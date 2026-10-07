@@ -243,9 +243,9 @@ LandmarkRoi calculateLandmarkRoi(
     const float longSide = std::max(palmWidth, palmHeight) * 2.9f;
     const float shiftY = -0.5f;
     const float centerX = (detection.box[0] + detection.box[2] * 0.5f) * imageWidth -
-        imageHeight * palmHeight * shiftY * std::sin(rotation);
+        palmHeight * shiftY * std::sin(rotation);
     const float centerY = (detection.box[1] + detection.box[3] * 0.5f) * imageHeight +
-        imageHeight * palmHeight * shiftY * std::cos(rotation);
+        palmHeight * shiftY * std::cos(rotation);
 
     return {
         centerX / imageWidth,
@@ -275,9 +275,9 @@ void decodeLandmark(
         const float localX = landmarks[index * 3] / landmarkInputSize;
         const float localY = landmarks[index * 3 + 1] / landmarkInputSize;
         const float squareX = points[1][0] + localX * (points[2][0] - points[1][0]) +
-            localY * (points[3][0] - points[1][0]);
+            localY * (points[3][0] - points[2][0]);
         const float squareY = points[1][1] + localX * (points[2][1] - points[1][1]) +
-            localY * (points[3][1] - points[1][1]);
+            localY * (points[3][1] - points[2][1]);
         const float paddingY = (std::max(imageWidth, imageHeight) - imageHeight) * 0.5f;
         detection.landmarks[index * 3] = squareX / imageWidth;
         detection.landmarks[index * 3 + 1] = (squareY - paddingY) / imageHeight;

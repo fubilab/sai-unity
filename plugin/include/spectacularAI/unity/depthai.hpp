@@ -42,6 +42,8 @@ struct ColorFrameQueue {
     void push(const std::shared_ptr<dai::ImgFrame>& frame) {
         std::lock_guard<std::mutex> lock(_mutex);
         _latest = frame;
+        _frames.push_back(frame);
+        while (_frames.size() > 16) _frames.pop_front();
     }
 
     std::shared_ptr<dai::ImgFrame> getLatest() const {
@@ -49,9 +51,18 @@ struct ColorFrameQueue {
         return _latest;
     }
 
+    std::shared_ptr<dai::ImgFrame> getBySequence(int64_t sequenceNumber) const {
+        std::lock_guard<std::mutex> lock(_mutex);
+        for (auto frame = _frames.rbegin(); frame != _frames.rend(); ++frame) {
+            if ((*frame)->getSequenceNum() == sequenceNumber) return *frame;
+        }
+        return nullptr;
+    }
+
 private:
     mutable std::mutex _mutex;
     std::shared_ptr<dai::ImgFrame> _latest;
+    std::deque<std::shared_ptr<dai::ImgFrame>> _frames;
 };
 
 struct PipelineWrapper {
