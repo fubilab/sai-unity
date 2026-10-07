@@ -24,9 +24,11 @@ Replace the existing `libspectacularAI_unity.so` [here](https://github.com/Spect
 ## Run C++ examples (for debugging/testing)
 1. Live example with DepthAI devices. Connect DepthAI device and then run
 ```
-.\Release\main_depthai.exe
+.\Release\main_depthai.exe path\to\palm_detection_sh4.blob path\to\hand_landmark_lite_sh4.blob
 ```
-The position of the device should be printed in your terminal.
+The terminal prints color-frame progress and native hand output. A line such as
+`hand output 123 (0 detections)` means the native pipeline is running but no palm
+was detected. A line such as `hand[0] palm=... landmark=...` confirms a decoded hand.
 
 2. If you have recorded datasets, then you can replay them using
 ```

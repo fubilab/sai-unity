@@ -3,12 +3,146 @@
 #include <string>
 #include <depthai/depthai.hpp>
 #include <depthai/device/DataQueue.hpp>
+#include <depthai/pipeline/datatype/ImgFrame.hpp>
+#include <depthai/pipeline/datatype/ImageManipConfig.hpp>
 #include <depthai/pipeline/datatype/NNData.hpp>
 #include <cassert>
+#include <cmath>
 #include <cstring>
 #include <stdexcept>
+#include <vector>
 
 namespace {
+
+struct Point2f {
+    float x;
+    float y;
+};
+
+Point2f landmarkSourcePoint(
+        const std::array<Point2f, 4>& points,
+        int outputX,
+        int outputY,
+        int outputSize) {
+    const Point2f& origin = points[1];
+    const float horizontal = static_cast<float>(outputX) / outputSize;
+    const float vertical = static_cast<float>(outputY) / outputSize;
+    return {
+        origin.x + horizontal * (points[2].x - origin.x) + vertical * (points[3].x - origin.x),
+        origin.y + horizontal * (points[2].y - origin.y) + vertical * (points[3].y - origin.y)};
+}
+
+std::uint8_t samplePlanarChannel(
+        const std::vector<std::uint8_t>& data,
+        std::size_t planeOffset,
+        int width,
+        int height,
+        float x,
+        float y) {
+    if (x < 0.0f || y < 0.0f || x > width - 1.0f || y > height - 1.0f) return 0;
+    const int x0 = static_cast<int>(std::floor(x));
+    const int y0 = static_cast<int>(std::floor(y));
+    const int x1 = std::min(x0 + 1, width - 1);
+    const int y1 = std::min(y0 + 1, height - 1);
+    const float xWeight = x - x0;
+    const float yWeight = y - y0;
+    const auto pixel = [&](int pixelX, int pixelY) {
+        return static_cast<float>(data[planeOffset + static_cast<std::size_t>(pixelY * width + pixelX)]);
+    };
+    const float top = pixel(x0, y0) * (1.0f - xWeight) + pixel(x1, y0) * xWeight;
+    const float bottom = pixel(x0, y1) * (1.0f - xWeight) + pixel(x1, y1) * xWeight;
+    return static_cast<std::uint8_t>(std::lround(top * (1.0f - yWeight) + bottom * yWeight));
+}
+
+std::shared_ptr<dai::NNData> createLandmarkInput(
+        const std::shared_ptr<dai::ImgFrame>& colorFrame,
+        const saiHandTracking::PalmDetection& detection) {
+    constexpr int outputSize = 224;
+    const int imageWidth = static_cast<int>(colorFrame->getWidth());
+    const int imageHeight = static_cast<int>(colorFrame->getHeight());
+    const int squareSize = std::max(imageWidth, imageHeight);
+    const float padY = static_cast<float>(squareSize - imageHeight) * 0.5f;
+    const saiHandTracking::LandmarkRoi roi =
+        saiHandTracking::calculateLandmarkRoi(
+            detection,
+            static_cast<float>(imageWidth),
+            static_cast<float>(imageHeight));
+    const float centerX = roi.centerX * imageWidth;
+    const float centerY = roi.centerY * imageHeight + padY;
+    const float side = roi.width * imageWidth;
+    const float angle = roi.angleDegrees * 3.14159265358979323846f / 180.0f;
+    const float b = std::cos(angle) * 0.5f;
+    const float a = std::sin(angle) * 0.5f;
+    const float p0x = centerX - a * side - b * side;
+    const float p0y = centerY + b * side - a * side;
+    const float p1x = centerX + a * side - b * side;
+    const float p1y = centerY - b * side - a * side;
+    const std::array<Point2f, 4> points = {{
+        {static_cast<float>(static_cast<int>(p0x)), static_cast<float>(static_cast<int>(p0y))},
+        {static_cast<float>(static_cast<int>(p1x)), static_cast<float>(static_cast<int>(p1y))},
+        {static_cast<float>(static_cast<int>(2.0f * centerX - p0x)), static_cast<float>(static_cast<int>(2.0f * centerY - p0y))},
+        {static_cast<float>(static_cast<int>(2.0f * centerX - p1x)), static_cast<float>(static_cast<int>(2.0f * centerY - p1y))}}};
+
+    const std::vector<std::uint8_t>& source = colorFrame->getData();
+    const std::size_t pixelCount = static_cast<std::size_t>(imageWidth) * imageHeight;
+    std::vector<std::uint8_t> planar(static_cast<std::size_t>(outputSize) * outputSize * 3);
+    // SAI's planar frame is RGB; Python's to_planar(cv2 frame) is BGR.
+    constexpr int sourcePlaneForBgr[] = {2, 1, 0};
+    for (int outputY = 0; outputY < outputSize; ++outputY) {
+        for (int outputX = 0; outputX < outputSize; ++outputX) {
+            const Point2f sourcePoint = landmarkSourcePoint(points, outputX, outputY, outputSize);
+            const float sourceY = sourcePoint.y - padY;
+            const std::size_t outputIndex = static_cast<std::size_t>(outputY * outputSize + outputX);
+            for (int channel = 0; channel < 3; ++channel) {
+                planar[static_cast<std::size_t>(channel) * outputSize * outputSize + outputIndex] =
+                    samplePlanarChannel(
+                        source,
+                        static_cast<std::size_t>(sourcePlaneForBgr[channel]) * pixelCount,
+                        imageWidth,
+                        imageHeight,
+                        sourcePoint.x,
+                        sourceY);
+            }
+        }
+    }
+    auto input = std::make_shared<dai::NNData>();
+    input->setLayer("input_1", planar);
+    return input;
+}
+
+std::shared_ptr<dai::ImgFrame> createPalmInput(
+        const std::shared_ptr<dai::ImgFrame>& colorFrame) {
+    constexpr int outputSize = 128;
+    const int imageWidth = static_cast<int>(colorFrame->getWidth());
+    const int imageHeight = static_cast<int>(colorFrame->getHeight());
+    const float scale = std::min(
+        static_cast<float>(outputSize) / imageWidth,
+        static_cast<float>(outputSize) / imageHeight);
+    const float offsetX = (outputSize - imageWidth * scale) * 0.5f;
+    const float offsetY = (outputSize - imageHeight * scale) * 0.5f;
+    const std::vector<std::uint8_t>& source = colorFrame->getData();
+    const std::size_t pixelCount = static_cast<std::size_t>(imageWidth) * imageHeight;
+    std::vector<std::uint8_t> planar(static_cast<std::size_t>(outputSize) * outputSize * 3, 0);
+    for (int outputY = 0; outputY < outputSize; ++outputY) {
+        for (int outputX = 0; outputX < outputSize; ++outputX) {
+            const float sourceX = (outputX - offsetX) / scale;
+            const float sourceY = (outputY - offsetY) / scale;
+            const std::size_t outputIndex = static_cast<std::size_t>(outputY * outputSize + outputX);
+            for (int channel = 0; channel < 3; ++channel) {
+                planar[static_cast<std::size_t>(channel) * outputSize * outputSize + outputIndex] =
+                    samplePlanarChannel(source, static_cast<std::size_t>(channel) * pixelCount,
+                        imageWidth, imageHeight, sourceX, sourceY);
+            }
+        }
+    }
+    auto input = std::make_shared<dai::ImgFrame>();
+    input->setSequenceNum(colorFrame->getSequenceNum());
+    input->setTimestampDevice(colorFrame->getTimestampDevice());
+    input->setSize(outputSize, outputSize);
+    input->setType(dai::ImgFrame::Type::RGB888p);
+    input->setData(std::move(planar));
+    return input;
+}
 
 void create_configuration(
         const ConfigurationWrapper &w,
@@ -77,15 +211,16 @@ PipelineWrapper* sai_depthai_pipeline_build(
         bool handTrackingPipelineEnabled = configuration->enableHandTracking &&
             configuration->handTrackingPalmModelPath != nullptr &&
             configuration->handTrackingPalmModelPath[0] != '\0';
+        bool handLandmarkPipelineEnabled = handTrackingPipelineEnabled &&
+            configuration->handTrackingLandmarkModelPath != nullptr &&
+            configuration->handTrackingLandmarkModelPath[0] != '\0';
         if (handTrackingPipelineEnabled) {
-            auto palmInput = pipeline->create<dai::node::ImageManip>();
-            palmInput->initialConfig.setResize(128, 128);
-            palmInput->setMaxOutputFrameSize(128 * 128 * 3);
-            handle->color->preview.link(palmInput->inputImage);
+            auto palmFrameInput = pipeline->create<dai::node::XLinkIn>();
+            palmFrameInput->setStreamName("sai_hand_palm_input");
 
             auto palmNetwork = pipeline->create<dai::node::NeuralNetwork>();
             palmNetwork->setBlobPath(configuration->handTrackingPalmModelPath);
-            palmInput->out.link(palmNetwork->input);
+            palmFrameInput->out.link(palmNetwork->input);
 
             auto palmOutput = pipeline->create<dai::node::XLinkOut>();
             palmOutput->setStreamName("sai_hand_palm");
@@ -94,14 +229,35 @@ PipelineWrapper* sai_depthai_pipeline_build(
             palmNetwork->out.link(palmOutput->input);
         }
 
+        if (handLandmarkPipelineEnabled) {
+            auto landmarkInput = pipeline->create<dai::node::XLinkIn>();
+            landmarkInput->setStreamName("sai_hand_landmark_input");
+            auto landmarkNetwork = pipeline->create<dai::node::NeuralNetwork>();
+            landmarkNetwork->setBlobPath(configuration->handTrackingLandmarkModelPath);
+            landmarkInput->out.link(landmarkNetwork->input);
+
+            auto landmarkOutput = pipeline->create<dai::node::XLinkOut>();
+            landmarkOutput->setStreamName("sai_hand_landmark");
+            landmarkOutput->input.setBlocking(false);
+            landmarkOutput->input.setQueueSize(4);
+            landmarkNetwork->out.link(landmarkOutput->input);
+        }
+
         std::shared_ptr<dai::Device> device = std::make_shared<dai::Device>(*pipeline);
         std::shared_ptr<dai::DataOutputQueue> colorOutput =
             (configuration->useColor || configuration->enableHandTracking) ?
             device->getOutputQueue("sai_color", 1, false) : nullptr;
         std::shared_ptr<dai::DataOutputQueue> handTrackingOutput = handTrackingPipelineEnabled ?
             device->getOutputQueue("sai_hand_palm", 1, false) : nullptr;
+        std::shared_ptr<dai::DataInputQueue> handTrackingPalmFrameInput = handTrackingPipelineEnabled ?
+            device->getInputQueue("sai_hand_palm_input", 4, false) : nullptr;
+        std::shared_ptr<dai::DataInputQueue> handTrackingLandmarkFrameInput = handLandmarkPipelineEnabled ?
+            device->getInputQueue("sai_hand_landmark_input", 4, false) : nullptr;
+        std::shared_ptr<dai::DataOutputQueue> handTrackingLandmarkOutput = handLandmarkPipelineEnabled ?
+            device->getOutputQueue("sai_hand_landmark", 4, false) : nullptr;
         return new PipelineWrapper(
-            handle, pipeline, device, colorFrames, colorOutput, handTrackingOutput);
+            handle, pipeline, device, colorFrames, colorOutput, handTrackingOutput,
+            handTrackingPalmFrameInput, nullptr, handTrackingLandmarkFrameInput, handTrackingLandmarkOutput);
     } catch (const std::exception &e) {
         if (errorMsg != nullptr) {
             strncpy(errorMsg, e.what(), 1000 - 1);
@@ -124,7 +280,11 @@ SessionWrapper* sai_depthai_pipeline_start_session(PipelineWrapper* pipelineHand
             pipelineHandle->getHandle()->startSession(*pipelineHandle->getDevice()),
             pipelineHandle->getColorFrames(),
             pipelineHandle->getColorOutput(),
-            pipelineHandle->getHandTrackingOutput());
+            pipelineHandle->getHandTrackingOutput(),
+            pipelineHandle->getHandTrackingPalmFrameInput(),
+            pipelineHandle->getHandTrackingLandmarkConfig(),
+            pipelineHandle->getHandTrackingLandmarkFrameInput(),
+            pipelineHandle->getHandTrackingLandmarkOutput());
     } catch(const std::exception &e) {
         if (errorMsg != nullptr) {
             strncpy(errorMsg, e.what(), 1000 - 1);
@@ -217,21 +377,113 @@ HandTrackingOutputWrapper* sai_depthai_session_get_hand_tracking_output(
     const auto outputQueue = sessionHandle->getHandTrackingOutput();
     if (!outputQueue) return nullptr;
 
+    const auto colorFrame = sessionHandle->getColorFrames()->getLatest();
+    const auto palmFrameInputQueue = sessionHandle->getHandTrackingPalmFrameInput();
+    auto* mutableSession = const_cast<SessionWrapper*>(sessionHandle);
+    if (colorFrame && palmFrameInputQueue &&
+        colorFrame->getSequenceNum() != mutableSession->getLastHandTrackingPalmConfigSequence()) {
+        palmFrameInputQueue->send(createPalmInput(colorFrame));
+        mutableSession->setLastHandTrackingPalmConfigSequence(colorFrame->getSequenceNum());
+    }
+
     std::shared_ptr<dai::NNData> inference;
     while (auto nextInference = outputQueue->tryGet<dai::NNData>()) {
         inference = nextInference;
     }
-    if (!inference) return nullptr;
+    const auto landmarkFrameInputQueue = sessionHandle->getHandTrackingLandmarkFrameInput();
+    const auto landmarkOutputQueue = sessionHandle->getHandTrackingLandmarkOutput();
 
-    std::vector<float> scores = inference->getLayerFp16("classificators");
-    std::vector<float> regressors = inference->getLayerFp16("regressors");
-    if (scores.empty() || regressors.empty()) return nullptr;
+    if (inference && !landmarkOutputQueue) {
+        std::vector<float> scores = inference->getLayerFp16("classificators");
+        std::vector<float> regressors = inference->getLayerFp16("regressors");
+        if (scores.empty() || regressors.empty()) return nullptr;
+        mutableSession->setLatestHandTrackingOutput(
+            saiHandTracking::suppressPalmDetections(
+                saiHandTracking::decodePalmDetections(scores, regressors, 0.5f, false),
+                0.3f,
+                2),
+            inference->getSequenceNum(),
+            std::chrono::duration<double>(inference->getTimestampDevice().time_since_epoch()).count());
+        return new HandTrackingOutputWrapper(
+            mutableSession->getLatestHandTrackingDetections(),
+            mutableSession->getLatestHandTrackingSequenceNumber(),
+            mutableSession->getLatestHandTrackingTimestamp());
+    }
 
+    const float imageWidth = colorFrame ? static_cast<float>(colorFrame->getWidth()) : 640.0f;
+    const float imageHeight = colorFrame ? static_cast<float>(colorFrame->getHeight()) : 360.0f;
+    auto& pending = mutableSession->getPendingHandTrackingOutputs();
+    if (inference) {
+        std::vector<float> scores = inference->getLayerFp16("classificators");
+        std::vector<float> regressors = inference->getLayerFp16("regressors");
+        if (scores.empty() || regressors.empty()) return nullptr;
+        std::vector<saiHandTracking::PalmDetection> detections =
+            saiHandTracking::suppressPalmDetections(
+                saiHandTracking::decodePalmDetections(scores, regressors, 0.5f, false),
+                0.3f,
+                2);
+        for (const auto& detection : detections) {
+            if (colorFrame && landmarkFrameInputQueue) {
+                landmarkFrameInputQueue->send(createLandmarkInput(colorFrame, detection));
+            }
+        }
+
+        pending.push_back({
+            std::move(detections),
+            inference->getSequenceNum(),
+            std::chrono::duration<double>(
+                inference->getTimestampDevice().time_since_epoch()).count(),
+            0});
+        while (pending.size() > 4) pending.pop_front();
+    }
+
+    while (auto landmarkInference = landmarkOutputQueue->tryGet<dai::NNData>()) {
+        while (!pending.empty() &&
+               pending.front().nextLandmarkIndex >= pending.front().detections.size()) {
+            pending.pop_front();
+        }
+        if (pending.empty()) break;
+
+        auto& frame = pending.front();
+        auto& detection = frame.detections[frame.nextLandmarkIndex++];
+        const std::vector<float> score = landmarkInference->hasLayer("Identity_1") ?
+            landmarkInference->getLayerFp16("Identity_1") : std::vector<float>();
+        const std::vector<float> handedness = landmarkInference->hasLayer("Identity_2") ?
+            landmarkInference->getLayerFp16("Identity_2") : std::vector<float>();
+        const std::vector<float> landmarks = landmarkInference->hasLayer("Identity_dense/BiasAdd/Add") ?
+            landmarkInference->getLayerFp16("Identity_dense/BiasAdd/Add") : std::vector<float>();
+        const std::vector<float> worldLandmarks = landmarkInference->hasLayer("Identity_3_dense/BiasAdd/Add") ?
+            landmarkInference->getLayerFp16("Identity_3_dense/BiasAdd/Add") : std::vector<float>();
+        const saiHandTracking::LandmarkRoi roi =
+            saiHandTracking::calculateLandmarkRoi(detection, imageWidth, imageHeight);
+        saiHandTracking::decodeLandmark(
+            detection, score, handedness, landmarks, worldLandmarks, roi, imageWidth, imageHeight);
+    }
+
+    while (!pending.empty() && pending.front().nextLandmarkIndex >= pending.front().detections.size()) {
+        PendingHandTrackingOutput completed = std::move(pending.front());
+        pending.pop_front();
+        completed.detections.erase(
+            std::remove_if(
+                completed.detections.begin(),
+                completed.detections.end(),
+                [](const saiHandTracking::PalmDetection& detection) {
+                    return !detection.hasLandmarks;
+                }),
+            completed.detections.end());
+        mutableSession->setLatestHandTrackingOutput(
+            completed.detections,
+            completed.sequenceNumber,
+            completed.timestamp);
+        return new HandTrackingOutputWrapper(
+            std::move(completed.detections), completed.sequenceNumber, completed.timestamp);
+    }
+
+    if (!mutableSession->hasLatestHandTrackingOutput()) return nullptr;
     return new HandTrackingOutputWrapper(
-        saiHandTracking::decodePalmDetections(scores, regressors, 0.5f, false),
-        inference->getSequenceNum(),
-        std::chrono::duration<double>(
-            inference->getTimestampDevice().time_since_epoch()).count());
+        mutableSession->getLatestHandTrackingDetections(),
+        mutableSession->getLatestHandTrackingSequenceNumber(),
+        mutableSession->getLatestHandTrackingTimestamp());
 }
 
 int sai_hand_tracking_output_get_count(const HandTrackingOutputWrapper* outputHandle) {
@@ -262,6 +514,51 @@ float sai_hand_tracking_output_get_box_value(
         int valueIndex) {
     assert(outputHandle);
     return outputHandle->getDetections().at(detectionIndex).box.at(valueIndex);
+}
+
+float sai_hand_tracking_output_get_keypoint_value(
+        const HandTrackingOutputWrapper* outputHandle,
+        int detectionIndex,
+        int valueIndex) {
+    assert(outputHandle);
+    return outputHandle->getDetections().at(detectionIndex).keypoints.at(valueIndex);
+}
+
+float sai_hand_tracking_output_get_landmark_score(
+        const HandTrackingOutputWrapper* outputHandle,
+        int detectionIndex) {
+    assert(outputHandle);
+    return outputHandle->getDetections().at(detectionIndex).landmarkScore;
+}
+
+float sai_hand_tracking_output_get_handedness(
+        const HandTrackingOutputWrapper* outputHandle,
+        int detectionIndex) {
+    assert(outputHandle);
+    return outputHandle->getDetections().at(detectionIndex).handedness;
+}
+
+int sai_hand_tracking_output_get_gesture(
+        const HandTrackingOutputWrapper* outputHandle,
+        int detectionIndex) {
+    assert(outputHandle);
+    return outputHandle->getDetections().at(detectionIndex).gesture;
+}
+
+float sai_hand_tracking_output_get_landmark_value(
+        const HandTrackingOutputWrapper* outputHandle,
+        int detectionIndex,
+        int valueIndex) {
+    assert(outputHandle);
+    return outputHandle->getDetections().at(detectionIndex).landmarks.at(valueIndex);
+}
+
+float sai_hand_tracking_output_get_world_landmark_value(
+        const HandTrackingOutputWrapper* outputHandle,
+        int detectionIndex,
+        int valueIndex) {
+    assert(outputHandle);
+    return outputHandle->getDetections().at(detectionIndex).worldLandmarks.at(valueIndex);
 }
 
 void sai_hand_tracking_output_release(const HandTrackingOutputWrapper* outputHandle) {

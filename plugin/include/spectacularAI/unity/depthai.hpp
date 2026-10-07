@@ -7,10 +7,12 @@
 #include "hand_tracking.hpp"
 
 #include <cstdint>
+#include <deque>
 #include <mutex>
 
 namespace dai {
 class DataOutputQueue;
+class DataInputQueue;
 }
 
 struct ConfigurationWrapper {
@@ -33,6 +35,7 @@ struct ConfigurationWrapper {
     bool lowLatency=false;
     bool enableHandTracking=false;
     const char* handTrackingPalmModelPath="";
+    const char* handTrackingLandmarkModelPath="";
 };
 
 struct ColorFrameQueue {
@@ -58,15 +61,27 @@ struct PipelineWrapper {
         std::shared_ptr<dai::Device> device,
         std::shared_ptr<ColorFrameQueue> colorFrames,
         std::shared_ptr<dai::DataOutputQueue> colorOutput,
-        std::shared_ptr<dai::DataOutputQueue> handTrackingOutput) :
+        std::shared_ptr<dai::DataOutputQueue> handTrackingOutput,
+        std::shared_ptr<dai::DataInputQueue> handTrackingPalmFrameInput,
+        std::shared_ptr<dai::DataInputQueue> handTrackingLandmarkConfig,
+        std::shared_ptr<dai::DataInputQueue> handTrackingLandmarkFrameInput,
+        std::shared_ptr<dai::DataOutputQueue> handTrackingLandmarkOutput) :
         _handle(handle), _pipeline(pipeline), _device(device),
         _colorFrames(colorFrames), _colorOutput(colorOutput),
-        _handTrackingOutput(handTrackingOutput) {};
+        _handTrackingOutput(handTrackingOutput),
+        _handTrackingPalmFrameInput(handTrackingPalmFrameInput),
+        _handTrackingLandmarkConfig(handTrackingLandmarkConfig),
+        _handTrackingLandmarkFrameInput(handTrackingLandmarkFrameInput),
+        _handTrackingLandmarkOutput(handTrackingLandmarkOutput) {};
     const std::shared_ptr<spectacularAI::daiPlugin::Pipeline> getHandle() const { return _handle; }
     const std::shared_ptr<dai::Device> getDevice() const { return _device; }
     const std::shared_ptr<ColorFrameQueue> getColorFrames() const { return _colorFrames; }
     const std::shared_ptr<dai::DataOutputQueue> getColorOutput() const { return _colorOutput; }
     const std::shared_ptr<dai::DataOutputQueue> getHandTrackingOutput() const { return _handTrackingOutput; }
+    const std::shared_ptr<dai::DataInputQueue> getHandTrackingPalmFrameInput() const { return _handTrackingPalmFrameInput; }
+    const std::shared_ptr<dai::DataInputQueue> getHandTrackingLandmarkConfig() const { return _handTrackingLandmarkConfig; }
+    const std::shared_ptr<dai::DataInputQueue> getHandTrackingLandmarkFrameInput() const { return _handTrackingLandmarkFrameInput; }
+    const std::shared_ptr<dai::DataOutputQueue> getHandTrackingLandmarkOutput() const { return _handTrackingLandmarkOutput; }
 
 private:
     const std::shared_ptr<spectacularAI::daiPlugin::Pipeline> _handle;
@@ -75,6 +90,17 @@ private:
     const std::shared_ptr<ColorFrameQueue> _colorFrames;
     const std::shared_ptr<dai::DataOutputQueue> _colorOutput;
     const std::shared_ptr<dai::DataOutputQueue> _handTrackingOutput;
+    const std::shared_ptr<dai::DataInputQueue> _handTrackingPalmFrameInput;
+    const std::shared_ptr<dai::DataInputQueue> _handTrackingLandmarkConfig;
+    const std::shared_ptr<dai::DataInputQueue> _handTrackingLandmarkFrameInput;
+    const std::shared_ptr<dai::DataOutputQueue> _handTrackingLandmarkOutput;
+};
+
+struct PendingHandTrackingOutput {
+    std::vector<saiHandTracking::PalmDetection> detections;
+    int64_t sequenceNumber;
+    double timestamp;
+    std::size_t nextLandmarkIndex = 0;
 };
 
 struct SessionWrapper {
@@ -82,19 +108,61 @@ struct SessionWrapper {
         std::unique_ptr<spectacularAI::daiPlugin::Session> handle,
         std::shared_ptr<ColorFrameQueue> colorFrames,
         std::shared_ptr<dai::DataOutputQueue> colorOutput,
-        std::shared_ptr<dai::DataOutputQueue> handTrackingOutput) :
+        std::shared_ptr<dai::DataOutputQueue> handTrackingOutput,
+        std::shared_ptr<dai::DataInputQueue> handTrackingPalmFrameInput,
+        std::shared_ptr<dai::DataInputQueue> handTrackingLandmarkConfig,
+        std::shared_ptr<dai::DataInputQueue> handTrackingLandmarkFrameInput,
+        std::shared_ptr<dai::DataOutputQueue> handTrackingLandmarkOutput) :
         _handle(std::move(handle)), _colorFrames(colorFrames),
-        _colorOutput(colorOutput), _handTrackingOutput(handTrackingOutput) {};
+        _colorOutput(colorOutput), _handTrackingOutput(handTrackingOutput),
+        _handTrackingPalmFrameInput(handTrackingPalmFrameInput),
+        _handTrackingLandmarkConfig(handTrackingLandmarkConfig),
+        _handTrackingLandmarkFrameInput(handTrackingLandmarkFrameInput),
+        _handTrackingLandmarkOutput(handTrackingLandmarkOutput) {};
     spectacularAI::daiPlugin::Session* getHandle() const { return _handle.get(); }
     const std::shared_ptr<ColorFrameQueue> getColorFrames() const { return _colorFrames; }
     const std::shared_ptr<dai::DataOutputQueue> getColorOutput() const { return _colorOutput; }
     const std::shared_ptr<dai::DataOutputQueue> getHandTrackingOutput() const { return _handTrackingOutput; }
+    const std::shared_ptr<dai::DataInputQueue> getHandTrackingPalmFrameInput() const { return _handTrackingPalmFrameInput; }
+    const std::shared_ptr<dai::DataInputQueue> getHandTrackingLandmarkConfig() const { return _handTrackingLandmarkConfig; }
+    const std::shared_ptr<dai::DataInputQueue> getHandTrackingLandmarkFrameInput() const { return _handTrackingLandmarkFrameInput; }
+    const std::shared_ptr<dai::DataOutputQueue> getHandTrackingLandmarkOutput() const { return _handTrackingLandmarkOutput; }
+    std::deque<PendingHandTrackingOutput>& getPendingHandTrackingOutputs() { return _pendingHandTrackingOutputs; }
+    void setLatestHandTrackingOutput(
+        std::vector<saiHandTracking::PalmDetection> detections,
+        int64_t sequenceNumber,
+        double timestamp) {
+        _latestHandTrackingDetections = std::move(detections);
+        _latestHandTrackingSequenceNumber = sequenceNumber;
+        _latestHandTrackingTimestamp = timestamp;
+        _hasHandTrackingOutput = true;
+    }
+    bool hasLatestHandTrackingOutput() const { return _hasHandTrackingOutput; }
+    const std::vector<saiHandTracking::PalmDetection>& getLatestHandTrackingDetections() const {
+        return _latestHandTrackingDetections;
+    }
+    int64_t getLatestHandTrackingSequenceNumber() const { return _latestHandTrackingSequenceNumber; }
+    double getLatestHandTrackingTimestamp() const { return _latestHandTrackingTimestamp; }
+    int64_t getLastHandTrackingPalmConfigSequence() const { return _lastHandTrackingPalmConfigSequence; }
+    void setLastHandTrackingPalmConfigSequence(int64_t sequenceNumber) {
+        _lastHandTrackingPalmConfigSequence = sequenceNumber;
+    }
 
 private:
     std::unique_ptr<spectacularAI::daiPlugin::Session> _handle;
     const std::shared_ptr<ColorFrameQueue> _colorFrames;
     const std::shared_ptr<dai::DataOutputQueue> _colorOutput;
     const std::shared_ptr<dai::DataOutputQueue> _handTrackingOutput;
+    const std::shared_ptr<dai::DataInputQueue> _handTrackingPalmFrameInput;
+    const std::shared_ptr<dai::DataInputQueue> _handTrackingLandmarkConfig;
+    const std::shared_ptr<dai::DataInputQueue> _handTrackingLandmarkFrameInput;
+    const std::shared_ptr<dai::DataOutputQueue> _handTrackingLandmarkOutput;
+    std::deque<PendingHandTrackingOutput> _pendingHandTrackingOutputs;
+    std::vector<saiHandTracking::PalmDetection> _latestHandTrackingDetections;
+    int64_t _latestHandTrackingSequenceNumber = -1;
+    double _latestHandTrackingTimestamp = 0.0;
+    int64_t _lastHandTrackingPalmConfigSequence = -1;
+    bool _hasHandTrackingOutput = false;
 };
 
 struct ColorFrameWrapper {
@@ -156,6 +224,27 @@ extern "C"
         const HandTrackingOutputWrapper* outputHandle,
         int detectionIndex);
     EXPORT_API float sai_hand_tracking_output_get_box_value(
+        const HandTrackingOutputWrapper* outputHandle,
+        int detectionIndex,
+        int valueIndex);
+    EXPORT_API float sai_hand_tracking_output_get_keypoint_value(
+        const HandTrackingOutputWrapper* outputHandle,
+        int detectionIndex,
+        int valueIndex);
+    EXPORT_API float sai_hand_tracking_output_get_landmark_score(
+        const HandTrackingOutputWrapper* outputHandle,
+        int detectionIndex);
+    EXPORT_API float sai_hand_tracking_output_get_handedness(
+        const HandTrackingOutputWrapper* outputHandle,
+        int detectionIndex);
+    EXPORT_API int sai_hand_tracking_output_get_gesture(
+        const HandTrackingOutputWrapper* outputHandle,
+        int detectionIndex);
+    EXPORT_API float sai_hand_tracking_output_get_landmark_value(
+        const HandTrackingOutputWrapper* outputHandle,
+        int detectionIndex,
+        int valueIndex);
+    EXPORT_API float sai_hand_tracking_output_get_world_landmark_value(
         const HandTrackingOutputWrapper* outputHandle,
         int detectionIndex,
         int valueIndex);
