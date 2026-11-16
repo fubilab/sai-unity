@@ -4,286 +4,31 @@
 #include <depthai/depthai.hpp>
 #include <depthai/device/DataQueue.hpp>
 #include <depthai/pipeline/datatype/ImgFrame.hpp>
-#include <depthai/pipeline/datatype/ImageManipConfig.hpp>
-#include <depthai/pipeline/datatype/NNData.hpp>
-#include <depthai/pipeline/datatype/SpatialLocationCalculatorConfig.hpp>
-#include <depthai/pipeline/datatype/SpatialLocationCalculatorData.hpp>
-#include <depthai/pipeline/node/SpatialLocationCalculator.hpp>
+#include <depthai/pipeline/datatype/Buffer.hpp>
+#include <depthai/pipeline/node/StereoDepth.hpp>
 #include <algorithm>
 #include <cassert>
-#include <cmath>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <iostream>
-#include <limits>
-#include <numeric>
 #include <stdexcept>
 #include <vector>
 
 namespace {
 
-struct Point2f {
-    float x;
-    float y;
-};
-
-Point2f landmarkSourcePoint(
-        const std::array<Point2f, 4>& points,
-        int outputX,
-        int outputY,
-        int outputSize) {
-    const Point2f& origin = points[1];
-    const float horizontal = static_cast<float>(outputX) / outputSize;
-    const float vertical = static_cast<float>(outputY) / outputSize;
-    return {
-        origin.x + horizontal * (points[2].x - origin.x) + vertical * (points[3].x - points[2].x),
-        origin.y + horizontal * (points[2].y - origin.y) + vertical * (points[3].y - points[2].y)};
+bool envEnabled(const char* name) {
+    const char* value = std::getenv(name);
+    return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
 }
 
-std::uint8_t samplePlanarChannel(
-        const std::vector<std::uint8_t>& data,
-        std::size_t planeOffset,
-        int width,
-        int height,
-        float x,
-        float y) {
-    if (x < 0.0f || y < 0.0f || x > width - 1.0f || y > height - 1.0f) return 0;
-    const int x0 = static_cast<int>(std::floor(x));
-    const int y0 = static_cast<int>(std::floor(y));
-    const int x1 = std::min(x0 + 1, width - 1);
-    const int y1 = std::min(y0 + 1, height - 1);
-    const float xWeight = x - x0;
-    const float yWeight = y - y0;
-    const auto pixel = [&](int pixelX, int pixelY) {
-        return static_cast<float>(data[planeOffset + static_cast<std::size_t>(pixelY * width + pixelX)]);
-    };
-    const float top = pixel(x0, y0) * (1.0f - xWeight) + pixel(x1, y0) * xWeight;
-    const float bottom = pixel(x0, y1) * (1.0f - xWeight) + pixel(x1, y1) * xWeight;
-    return static_cast<std::uint8_t>(std::lround(top * (1.0f - yWeight) + bottom * yWeight));
+int envInt(const char* name, int defaultValue) {
+    const char* value = std::getenv(name);
+    return (value != nullptr && value[0] != '\0') ? std::atoi(value) : defaultValue;
 }
 
-std::shared_ptr<dai::NNData> createLandmarkInput(
-        const std::shared_ptr<dai::ImgFrame>& colorFrame,
-    const saiHandTracking::PalmDetection& detection,
-    int64_t palmSequence) {
-    constexpr int outputSize = 224;
-    const int imageWidth = static_cast<int>(colorFrame->getWidth());
-    const int imageHeight = static_cast<int>(colorFrame->getHeight());
-    const int squareSize = std::max(imageWidth, imageHeight);
-    const float padY = static_cast<float>(squareSize - imageHeight) * 0.5f;
-    const saiHandTracking::LandmarkRoi roi =
-        saiHandTracking::calculateLandmarkRoi(
-            detection,
-            static_cast<float>(squareSize),
-            static_cast<float>(squareSize));
-    const float centerX = roi.centerX * squareSize;
-    const float centerY = roi.centerY * squareSize;
-    const float side = roi.width * squareSize;
-    const float angle = roi.angleDegrees * 3.14159265358979323846f / 180.0f;
-    const float b = std::cos(angle) * 0.5f;
-    const float a = std::sin(angle) * 0.5f;
-    const float p0x = centerX - a * side - b * side;
-    const float p0y = centerY + b * side - a * side;
-    const float p1x = centerX + a * side - b * side;
-    const float p1y = centerY - b * side - a * side;
-    const std::array<Point2f, 4> points = {{
-        {static_cast<float>(static_cast<int>(p0x)), static_cast<float>(static_cast<int>(p0y))},
-        {static_cast<float>(static_cast<int>(p1x)), static_cast<float>(static_cast<int>(p1y))},
-        {static_cast<float>(static_cast<int>(2.0f * centerX - p0x)), static_cast<float>(static_cast<int>(2.0f * centerY - p0y))},
-        {static_cast<float>(static_cast<int>(2.0f * centerX - p1x)), static_cast<float>(static_cast<int>(2.0f * centerY - p1y))}}};
-
-    const std::vector<std::uint8_t>& source = colorFrame->getData();
-    const std::size_t pixelCount = static_cast<std::size_t>(imageWidth) * imageHeight;
-    std::vector<std::uint8_t> planar(static_cast<std::size_t>(outputSize) * outputSize * 3);
-    const char* frameDumpPath = std::getenv("SAI_HAND_TRACKING_FRAME_DUMP");
-    static bool frameDumped = false;
-    if (frameDumpPath && frameDumpPath[0] != '\0' && !frameDumped) {
-        std::ofstream frameDump(frameDumpPath, std::ios::binary);
-        frameDump << "P6\n" << imageWidth << ' ' << imageHeight << "\n255\n";
-        const bool isBgr = colorFrame->getType() == dai::ImgFrame::Type::BGR888p;
-        for (std::size_t index = 0; index < pixelCount; ++index) {
-            const char rgb[] = {
-                static_cast<char>(source[(isBgr ? 2 : 0) * pixelCount + index]),
-                static_cast<char>(source[pixelCount + index]),
-                static_cast<char>(source[(isBgr ? 0 : 2) * pixelCount + index])};
-            frameDump.write(rgb, sizeof(rgb));
-        }
-        frameDumped = static_cast<bool>(frameDump);
-        if (frameDumped) {
-            std::clog << "[sai-hand] source_frame_dump seq="
-                << colorFrame->getSequenceNum() << " path=" << frameDumpPath << std::endl;
-        }
-    }
-    constexpr int sourcePlaneForBgr[] = {2, 1, 0};
-    for (int outputY = 0; outputY < outputSize; ++outputY) {
-        for (int outputX = 0; outputX < outputSize; ++outputX) {
-            const Point2f sourcePoint = landmarkSourcePoint(points, outputX, outputY, outputSize);
-            const float sourceY = sourcePoint.y - padY;
-            const std::size_t outputIndex = static_cast<std::size_t>(outputY * outputSize + outputX);
-            for (int channel = 0; channel < 3; ++channel) {
-                planar[static_cast<std::size_t>(channel) * outputSize * outputSize + outputIndex] =
-                    samplePlanarChannel(
-                        source,
-                        static_cast<std::size_t>(sourcePlaneForBgr[channel]) * pixelCount,
-                        imageWidth,
-                        imageHeight,
-                        sourcePoint.x,
-                        sourceY);
-            }
-        }
-    }
-    const char* cropDumpPath = std::getenv("SAI_HAND_TRACKING_CROP_DUMP");
-    static bool cropDumped = false;
-    if (cropDumpPath && cropDumpPath[0] != '\0' && !cropDumped) {
-        std::ofstream cropDump(cropDumpPath, std::ios::binary);
-        cropDump << "P6\n" << outputSize << ' ' << outputSize << "\n255\n";
-        for (std::size_t index = 0; index < outputSize * outputSize; ++index) {
-            const char rgb[] = {
-                static_cast<char>(planar[2 * outputSize * outputSize + index]),
-                static_cast<char>(planar[outputSize * outputSize + index]),
-                static_cast<char>(planar[index])};
-            cropDump.write(rgb, sizeof(rgb));
-        }
-        cropDumped = static_cast<bool>(cropDump);
-    }
-    static const bool debugEnabled = std::getenv("SAI_HAND_TRACKING_DEBUG") != nullptr;
-    static std::size_t debugCount = 0;
-    if (debugEnabled && debugCount++ % 10 == 0) {
-        const auto range = std::minmax_element(planar.begin(), planar.end());
-        const double mean = std::accumulate(planar.begin(), planar.end(), 0.0) / planar.size();
-        std::clog << "[sai-hand] landmark_input palm_seq=" << palmSequence
-            << " frame_seq=" << colorFrame->getSequenceNum()
-            << " palm_score=" << detection.score
-            << " box=" << detection.box[0] << ',' << detection.box[1] << ','
-            << detection.box[2] << ',' << detection.box[3]
-            << " roi_center=" << roi.centerX << ',' << roi.centerY
-            << " roi_size=" << roi.width << ',' << roi.height
-            << " angle=" << roi.angleDegrees
-            << " pixel_min=" << static_cast<int>(*range.first)
-            << " pixel_max=" << static_cast<int>(*range.second)
-            << " pixel_mean=" << mean << std::endl;
-    }
-    auto input = std::make_shared<dai::NNData>();
-    input->setLayer("input_1", planar);
-    return input;
-}
-
-std::shared_ptr<dai::ImgFrame> createPalmInput(
-        const std::shared_ptr<dai::ImgFrame>& colorFrame) {
-    constexpr int outputSize = 128;
-    const int imageWidth = static_cast<int>(colorFrame->getWidth());
-    const int imageHeight = static_cast<int>(colorFrame->getHeight());
-    const float scale = std::min(
-        static_cast<float>(outputSize) / imageWidth,
-        static_cast<float>(outputSize) / imageHeight);
-    const float offsetX = (outputSize - imageWidth * scale) * 0.5f;
-    const float offsetY = (outputSize - imageHeight * scale) * 0.5f;
-    const std::vector<std::uint8_t>& source = colorFrame->getData();
-    const std::size_t pixelCount = static_cast<std::size_t>(imageWidth) * imageHeight;
-    std::vector<std::uint8_t> planar(static_cast<std::size_t>(outputSize) * outputSize * 3, 0);
-    static const bool logFrameType = std::getenv("SAI_HAND_TRACKING_DEBUG") != nullptr;
-    static bool frameTypeLogged = false;
-    if (logFrameType && !frameTypeLogged) {
-        std::clog << "[sai-hand] color_frame_type="
-            << static_cast<int>(colorFrame->getType()) << std::endl;
-        frameTypeLogged = true;
-    }
-    constexpr int sourcePlaneForBgr[] = {2, 1, 0};
-    for (int outputY = 0; outputY < outputSize; ++outputY) {
-        for (int outputX = 0; outputX < outputSize; ++outputX) {
-            const float sourceX = (outputX - offsetX) / scale;
-            const float sourceY = (outputY - offsetY) / scale;
-            const std::size_t outputIndex = static_cast<std::size_t>(outputY * outputSize + outputX);
-            for (int channel = 0; channel < 3; ++channel) {
-                planar[static_cast<std::size_t>(channel) * outputSize * outputSize + outputIndex] =
-                    samplePlanarChannel(source,
-                        static_cast<std::size_t>(sourcePlaneForBgr[channel]) * pixelCount,
-                        imageWidth, imageHeight, sourceX, sourceY);
-            }
-        }
-    }
-    auto input = std::make_shared<dai::ImgFrame>();
-    input->setSequenceNum(colorFrame->getSequenceNum());
-    input->setTimestampDevice(colorFrame->getTimestampDevice());
-    input->setSize(outputSize, outputSize);
-    input->setType(dai::ImgFrame::Type::BGR888p);
-    input->setData(std::move(planar));
-    return input;
-}
-
-void logPalmInference(
-        const dai::NNData& inference,
-    int64_t latestColorSequence,
-        const std::vector<float>& scores,
-        const std::vector<float>& regressors,
-        std::size_t decodedCount,
-        std::size_t suppressedCount) {
-    static const bool enabled = std::getenv("SAI_HAND_TRACKING_DEBUG") != nullptr;
-    static std::size_t inferenceCount = 0;
-    if (!enabled || inferenceCount++ % 30 != 0) return;
-
-    const float maxLogit = scores.empty() ? -std::numeric_limits<float>::infinity() :
-        *std::max_element(scores.begin(), scores.end());
-    const float maxProbability = 1.0f / (1.0f + std::exp(-maxLogit));
-    std::clog << "[sai-hand] palm seq=" << inference.getSequenceNum()
-        << " latest_color_seq=" << latestColorSequence
-        << " frame_lag=" << latestColorSequence - inference.getSequenceNum()
-        << " score_values=" << scores.size()
-        << " regressor_values=" << regressors.size()
-        << " max_logit=" << maxLogit
-        << " max_probability=" << maxProbability
-        << " decoded=" << decodedCount
-        << " after_nms=" << suppressedCount << std::endl;
-}
-
-void logLandmarkInference(
-        const dai::NNData& inference,
-        const std::vector<float>& score,
-        const std::vector<float>& handedness,
-        const std::vector<float>& landmarks,
-        const std::vector<float>& worldLandmarks) {
-    static const bool enabled = std::getenv("SAI_HAND_TRACKING_DEBUG") != nullptr;
-    static std::size_t inferenceCount = 0;
-    if (!enabled || inferenceCount++ % 10 != 0) return;
-
-    std::clog << "[sai-hand] landmark seq=" << inference.getSequenceNum()
-        << " score_values=" << score.size()
-        << " score=" << (score.empty() ? -1.0f : score[0])
-        << " handedness_values=" << handedness.size()
-        << " landmark_values=" << landmarks.size()
-        << " world_landmark_values=" << worldLandmarks.size() << std::endl;
-}
-
-dai::SpatialLocationCalculatorConfigData createWristSpatialConfig(
-        const saiHandTracking::PalmDetection& detection,
-        float imageWidth,
-        float imageHeight) {
-    const saiHandTracking::LandmarkRoi landmarkRoi =
-        saiHandTracking::calculateLandmarkRoi(detection, imageWidth, imageHeight);
-    const float squareSize = std::max(imageWidth, imageHeight);
-    const int zoneSize = std::max(
-        static_cast<int>(landmarkRoi.width * squareSize / 10.0f),
-        8);
-    const float left = std::clamp(
-        detection.landmarks[0] - static_cast<float>(zoneSize / 2) / imageWidth,
-        0.0f,
-        std::max(0.0f, 1.0f - zoneSize / imageWidth));
-    const float top = std::clamp(
-        detection.landmarks[1] - static_cast<float>(zoneSize / 2) / imageHeight,
-        0.0f,
-        std::max(0.0f, 1.0f - zoneSize / imageHeight));
-
-    dai::SpatialLocationCalculatorConfigData config;
-    config.roi = dai::Rect(
-        left,
-        top,
-        std::min(1.0f, zoneSize / imageWidth),
-        std::min(1.0f, zoneSize / imageHeight));
-    config.depthThresholds.lowerThreshold = 100;
-    config.depthThresholds.upperThreshold = 10000;
-    config.calculationAlgorithm = dai::SpatialLocationCalculatorAlgorithm::MEDIAN;
-    return config;
+std::string envString(const char* name) {
+    const char* value = std::getenv(name);
+    return value != nullptr ? std::string(value) : std::string();
 }
 
 void create_configuration(
@@ -307,7 +52,8 @@ void create_configuration(
     config.recordingOnly = w.recordingOnly;
     config.fastImu = w.fastImu;
     config.lowLatency = w.lowLatency;
-    config.useColor = w.useColor;
+    // The hand tracking needs the color camera
+    config.useColor = w.useColor || w.enableHandTracking;
 
     for (int i = 0; i < internalParametersCount; ++i) {
         std::string k = std::string(internalParameters[2 * i]);
@@ -316,14 +62,41 @@ void create_configuration(
     }
 }
 
+// Error of the last failed call of this thread, see sai_depthai_get_last_error
+thread_local std::string g_lastError;
+
+void copyError(char* errorMsg, const char* message) {
+    g_lastError = message;
+    if (errorMsg == nullptr) return;
+    strncpy(errorMsg, message, 1000 - 1);
+    errorMsg[1000 - 1] = '\0';
+}
+
+// Intrinsics of the color preview image, from the device calibration
+saiHandTracking::Intrinsics readColorIntrinsics(dai::Device& device, int width, int height) {
+    saiHandTracking::Intrinsics intrinsics;
+    try {
+        const auto matrix = device.readCalibration().getCameraIntrinsics(dai::CameraBoardSocket::CAM_A, width, height);
+        intrinsics.fx = matrix[0][0];
+        intrinsics.fy = matrix[1][1];
+        intrinsics.cx = matrix[0][2];
+        intrinsics.cy = matrix[1][2];
+    } catch (const std::exception& e) {
+        std::cerr << "[sai-hand] cannot read color camera calibration: " << e.what() << std::endl;
+    }
+    return intrinsics;
+}
+
 } // anonymous namespace
 
 PipelineWrapper* sai_depthai_pipeline_build(
         ConfigurationWrapper* configuration,
         const char** internalParameters,
         int internalParametersCount,
-        callback_t_mapper_output onMapperOutput,
-        char* errorMsg) {
+        callback_t_mapper_output onMapperOutput) {
+    // Same signature as the original plugin, errors are reported with sai_depthai_get_last_error
+    char* errorMsg = nullptr;
+    g_lastError.clear();
     try {
         std::shared_ptr<dai::Pipeline> pipeline = std::make_shared<dai::Pipeline>();
         std::shared_ptr<ColorFrameQueue> colorFrames = std::make_shared<ColorFrameQueue>();
@@ -337,151 +110,247 @@ PipelineWrapper* sai_depthai_pipeline_build(
                     onMapperOutput(new MapperOutputWrapper(mapperOutput));
                 })
             : std::make_shared<spectacularAI::daiPlugin::Pipeline>(*pipeline, config);
-        if (configuration->useColor || configuration->enableHandTracking) {
-            handle->color->setInterleaved(false);
-            handle->hooks.color = [colorFrames](std::shared_ptr<dai::ImgFrame> frame) {
-                colorFrames->push(frame);
-            };
 
-            auto colorOutputNode = pipeline->create<dai::node::XLinkOut>();
-            colorOutputNode->setStreamName("sai_color");
-            colorOutputNode->input.setBlocking(false);
-            colorOutputNode->input.setQueueSize(1);
-            handle->color->preview.link(colorOutputNode->input);
+        const bool handTrackingRequested = configuration->enableHandTracking;
+        const bool wantColor = configuration->useColor || handTrackingRequested;
+        int previewWidth = 0;
+        int previewHeight = 0;
+        if (wantColor) {
+            if (!handle->color) throw std::runtime_error("The color camera is not available in this configuration.");
+            handle->color->setInterleaved(false);
+            // The color camera is a main heat source of the device. Hand tracking does not need 30 fps.
+            const int colorFps = envInt("SAI_HAND_COLOR_FPS", configuration->handTrackingColorFps);
+            if (handTrackingRequested && colorFps > 0) handle->color->setFps(static_cast<float>(colorFps));
+            previewWidth = handle->color->getPreviewWidth();
+            previewHeight = handle->color->getPreviewHeight();
+            if (envEnabled("SAI_HAND_TRACKING_DEBUG")) {
+                std::clog << "[sai-hand] color camera: fps=" << handle->color->getFps()
+                    << " preview=" << previewWidth << "x" << previewHeight
+                    << " isp=" << handle->color->getIspWidth() << "x" << handle->color->getIspHeight() << std::endl;
+            }
+
+            // In offline replay nobody reads the live preview. Do not stream it (diagnostics, SAI_HAND_NO_PREVIEW).
+            if (!envEnabled("SAI_HAND_NO_PREVIEW")) {
+                auto colorOutputNode = pipeline->create<dai::node::XLinkOut>();
+                colorOutputNode->setStreamName("sai_color");
+                colorOutputNode->input.setBlocking(false);
+                colorOutputNode->input.setQueueSize(1);
+                handle->color->preview.link(colorOutputNode->input);
+            }
         }
 
-        bool handTrackingPipelineEnabled = configuration->enableHandTracking &&
-            configuration->handTrackingPalmModelPath != nullptr &&
-            configuration->handTrackingPalmModelPath[0] != '\0';
-        bool handLandmarkPipelineEnabled = handTrackingPipelineEnabled &&
-            configuration->handTrackingLandmarkModelPath != nullptr &&
-            configuration->handTrackingLandmarkModelPath[0] != '\0';
-        const bool handSpatialPipelineEnabled = handTrackingPipelineEnabled &&
-            configuration->useStereo && !configuration->useColorStereoCameras;
-        if (handTrackingPipelineEnabled) {
-            auto palmFrameInput = pipeline->create<dai::node::XLinkIn>();
-            palmFrameInput->setStreamName("sai_hand_palm_input");
+        const bool handTrackingEnabled = handTrackingRequested;
+        if (handTrackingEnabled &&
+            (configuration->handTrackingPalmModelPath == nullptr || configuration->handTrackingPalmModelPath[0] == '\0' ||
+             configuration->handTrackingLandmarkModelPath == nullptr || configuration->handTrackingLandmarkModelPath[0] == '\0')) {
+            throw std::runtime_error("Hand tracking requires the palm detection and hand landmark model paths.");
+        }
 
+        bool depthEnabled = false;
+        if (handTrackingEnabled) {
+            // Palm detection: host sends the (letterboxed) color frame, receives the raw detections
+            auto palmInput = pipeline->create<dai::node::XLinkIn>();
+            palmInput->setStreamName("sai_hand_palm_input");
             auto palmNetwork = pipeline->create<dai::node::NeuralNetwork>();
             palmNetwork->setBlobPath(configuration->handTrackingPalmModelPath);
-            palmNetwork->input.setQueueSize(1);
-            palmNetwork->input.setBlocking(false);
-            palmFrameInput->out.link(palmNetwork->input);
-
+            palmNetwork->setNumInferenceThreads(envInt("SAI_HAND_PALM_THREADS", 1));
+            if (envInt("SAI_HAND_PALM_NCE", 0) > 0) palmNetwork->setNumNCEPerInferenceThread(envInt("SAI_HAND_PALM_NCE", 0));
+            palmInput->out.link(palmNetwork->input);
             auto palmOutput = pipeline->create<dai::node::XLinkOut>();
             palmOutput->setStreamName("sai_hand_palm");
-            palmOutput->input.setBlocking(false);
-            palmOutput->input.setQueueSize(1);
             palmNetwork->out.link(palmOutput->input);
-        }
 
-        if (handLandmarkPipelineEnabled) {
+            // Hand landmarks: host sends the cropped and rotated hand image(s)
             auto landmarkInput = pipeline->create<dai::node::XLinkIn>();
             landmarkInput->setStreamName("sai_hand_landmark_input");
             auto landmarkNetwork = pipeline->create<dai::node::NeuralNetwork>();
             landmarkNetwork->setBlobPath(configuration->handTrackingLandmarkModelPath);
+            landmarkNetwork->setNumInferenceThreads(envInt("SAI_HAND_LM_THREADS", 2));
+            if (envInt("SAI_HAND_LM_NCE", 0) > 0) landmarkNetwork->setNumNCEPerInferenceThread(envInt("SAI_HAND_LM_NCE", 0));
             landmarkInput->out.link(landmarkNetwork->input);
-
             auto landmarkOutput = pipeline->create<dai::node::XLinkOut>();
             landmarkOutput->setStreamName("sai_hand_landmark");
-            landmarkOutput->input.setBlocking(false);
-            landmarkOutput->input.setQueueSize(4);
             landmarkNetwork->out.link(landmarkOutput->input);
+
+            // Depth aligned to the color camera, used to calibrate the user's hand size
+            depthEnabled = configuration->handTrackingUseDepth && configuration->useStereo &&
+                !configuration->useColorStereoCameras;
+            if (depthEnabled && (!handle->monoLeft || !handle->monoRight)) {
+                std::cerr << "[sai-hand] stereo cameras not available, hand depth disabled" << std::endl;
+                depthEnabled = false;
+            }
+            if (depthEnabled) {
+                auto stereo = pipeline->create<dai::node::StereoDepth>();
+                stereo->setDefaultProfilePreset(dai::node::StereoDepth::PresetMode::HIGH_DENSITY);
+                stereo->setDepthAlign(dai::CameraBoardSocket::CAM_A);
+                stereo->setLeftRightCheck(true);
+                stereo->setOutputSize(previewWidth, previewHeight);
+                handle->monoLeft->out.link(stereo->left);
+                handle->monoRight->out.link(stereo->right);
+                auto depthOutput = pipeline->create<dai::node::XLinkOut>();
+                depthOutput->setStreamName("sai_hand_depth");
+                depthOutput->input.setBlocking(false);
+                depthOutput->input.setQueueSize(2);
+                stereo->depth.link(depthOutput->input);
+            }
         }
 
-        if (handSpatialPipelineEnabled) {
-            if (!handle->monoLeft || !handle->monoRight) {
-                throw std::runtime_error("Hand XYZ requires the SAI mono camera nodes.");
+        if (envEnabled("SAI_HAND_BENCH")) {
+            auto benchIn = pipeline->create<dai::node::XLinkIn>();
+            benchIn->setStreamName("sai_bench_in");
+            auto benchOut = pipeline->create<dai::node::XLinkOut>();
+            benchOut->setStreamName("sai_bench_out");
+            benchIn->out.link(benchOut->input);
+        }
+
+        if (envEnabled("SAI_HAND_DUMP_NODES")) {
+            const auto schema = pipeline->getPipelineSchema(dai::SerializationType::JSON);
+            for (const auto& entry : schema.nodes) {
+                const auto& node = entry.second;
+                std::string properties(node.properties.begin(), node.properties.end());
+                if (properties.size() > 1500) properties.resize(1500);
+                std::clog << "[sai-hand] node " << node.id << " " << node.name << " " << properties << std::endl;
             }
+        }
 
-            auto handSpatialStereo = pipeline->create<dai::node::StereoDepth>();
-            handSpatialStereo->setLeftRightCheck(true);
-            handSpatialStereo->setDepthAlign(dai::CameraBoardSocket::RGB);
-            handle->monoLeft->out.link(handSpatialStereo->left);
-            handle->monoRight->out.link(handSpatialStereo->right);
-
-            auto spatialCalculator = pipeline->create<dai::node::SpatialLocationCalculator>();
-            spatialCalculator->setWaitForConfigInput(true);
-            spatialCalculator->inputDepth.setQueueSize(1);
-            spatialCalculator->inputDepth.setBlocking(false);
-            handSpatialStereo->depth.link(spatialCalculator->inputDepth);
-
-            auto spatialConfigInput = pipeline->create<dai::node::XLinkIn>();
-            spatialConfigInput->setStreamName("sai_hand_spatial_config");
-            spatialConfigInput->out.link(spatialCalculator->inputConfig);
-
-            auto spatialOutput = pipeline->create<dai::node::XLinkOut>();
-            spatialOutput->setStreamName("sai_hand_spatial_data");
-            spatialOutput->input.setQueueSize(4);
-            spatialOutput->input.setBlocking(false);
-            spatialCalculator->out.link(spatialOutput->input);
+        if (envEnabled("SAI_HAND_TRACKING_DEBUG")) {
+            std::clog << "[sai-hand] pipeline nodes:";
+            for (const auto& node : pipeline->getAllNodes()) std::clog << " " << node->getName();
+            std::clog << std::endl;
         }
 
         std::shared_ptr<dai::Device> device = std::make_shared<dai::Device>(*pipeline);
         std::shared_ptr<dai::DataOutputQueue> colorOutput =
-            (configuration->useColor || configuration->enableHandTracking) ?
-            device->getOutputQueue("sai_color", 1, false) : nullptr;
-        std::shared_ptr<dai::DataOutputQueue> handTrackingOutput = handTrackingPipelineEnabled ?
-            device->getOutputQueue("sai_hand_palm", 1, false) : nullptr;
-        std::shared_ptr<dai::DataInputQueue> handTrackingPalmFrameInput = handTrackingPipelineEnabled ?
-            device->getInputQueue("sai_hand_palm_input", 4, false) : nullptr;
-        std::shared_ptr<dai::DataInputQueue> handTrackingLandmarkFrameInput = handLandmarkPipelineEnabled ?
-            device->getInputQueue("sai_hand_landmark_input", 4, false) : nullptr;
-        std::shared_ptr<dai::DataOutputQueue> handTrackingLandmarkOutput = handLandmarkPipelineEnabled ?
-            device->getOutputQueue("sai_hand_landmark", 4, false) : nullptr;
-        std::shared_ptr<dai::DataInputQueue> handTrackingSpatialConfigInput = handSpatialPipelineEnabled ?
-            device->getInputQueue("sai_hand_spatial_config", 4, false) : nullptr;
-        std::shared_ptr<dai::DataOutputQueue> handTrackingSpatialOutput = handSpatialPipelineEnabled ?
-            device->getOutputQueue("sai_hand_spatial_data", 4, false) : nullptr;
-        return new PipelineWrapper(
-            handle, pipeline, device, colorFrames, colorOutput, handTrackingOutput,
-            handTrackingPalmFrameInput, nullptr, handTrackingLandmarkFrameInput, handTrackingLandmarkOutput,
-            handTrackingSpatialConfigInput, handTrackingSpatialOutput);
+            (wantColor && !envEnabled("SAI_HAND_NO_PREVIEW")) ? device->getOutputQueue("sai_color", 1, false) : nullptr;
+
+        HandTrackingSetup handTracking;
+        if (handTrackingEnabled) {
+            if (depthEnabled && configuration->handTrackingIrProjectorIntensity > 0.0f) {
+                if (!device->setIrLaserDotProjectorIntensity(configuration->handTrackingIrProjectorIntensity)) {
+                    std::cerr << "[sai-hand] cannot enable the IR dot projector" << std::endl;
+                }
+            }
+            handTracking.enabled = true;
+            handTracking.endpoints.color = colorOutput;
+            handTracking.endpoints.palmInput = device->getInputQueue("sai_hand_palm_input", 4, false);
+            handTracking.endpoints.palmOutput = device->getOutputQueue("sai_hand_palm", 4, false);
+            handTracking.endpoints.landmarkInput = device->getInputQueue("sai_hand_landmark_input", 4, false);
+            handTracking.endpoints.landmarkOutput = device->getOutputQueue("sai_hand_landmark", 4, false);
+            if (depthEnabled) handTracking.endpoints.depth = device->getOutputQueue("sai_hand_depth", 2, false);
+            handTracking.intrinsics = readColorIntrinsics(*device, previewWidth, previewHeight);
+            {
+                std::shared_ptr<dai::Device> deviceForTemperature = device;
+                handTracking.endpoints.chipTemperature = [deviceForTemperature]() {
+                    return deviceForTemperature->getChipTemperature().average;
+                };
+            }
+            handTracking.settings.searchIntervalMs =
+                envInt("SAI_HAND_SEARCH_INTERVAL_MS", handTracking.settings.searchIntervalMs);
+            handTracking.settings.throttleStartC = static_cast<float>(
+                envInt("SAI_HAND_THROTTLE_START_C", static_cast<int>(handTracking.settings.throttleStartC)));
+            handTracking.settings.maxHands = std::max(1, std::min(2, configuration->handTrackingMaxHands));
+            handTracking.settings.solo = handTracking.settings.maxHands == 1;
+            // Testing and diagnostics, see README
+            handTracking.settings.replayPath = envString("SAI_HAND_REPLAY");
+            handTracking.settings.replayRealtime = envEnabled("SAI_HAND_REPLAY_REALTIME");
+            handTracking.settings.replayLoop = envEnabled("SAI_HAND_REPLAY_LOOP");
+            handTracking.settings.logPath = envString("SAI_HAND_LOG");
+            if (envEnabled("SAI_HAND_TRACKING_DEBUG")) {
+                std::clog << "[sai-hand] color intrinsics fx=" << handTracking.intrinsics.fx
+                    << " fy=" << handTracking.intrinsics.fy << " cx=" << handTracking.intrinsics.cx
+                    << " cy=" << handTracking.intrinsics.cy << " depth=" << (depthEnabled ? "on" : "off") << std::endl;
+            }
+        }
+
+        return new PipelineWrapper(handle, pipeline, device, colorFrames, colorOutput, std::move(handTracking));
     } catch (const std::exception &e) {
-        if (errorMsg != nullptr) {
-            strncpy(errorMsg, e.what(), 1000 - 1);
-            errorMsg[1000 - 1] = '\0';
-        }
+        copyError(errorMsg, e.what());
     } catch (...) {
-        if (errorMsg != nullptr) {
-            strncpy(errorMsg, "Unknown native exception while building the DepthAI pipeline.", 1000 - 1);
-            errorMsg[1000 - 1] = '\0';
-        }
+        copyError(errorMsg, "Unknown native exception while building the DepthAI pipeline.");
     }
 
     return nullptr;
 }
 
 SessionWrapper* sai_depthai_pipeline_start_session(PipelineWrapper* pipelineHandle, char* errorMsg) {
-    assert(pipelineHandle);
-    try {
-        return new SessionWrapper(
-            pipelineHandle->getHandle()->startSession(*pipelineHandle->getDevice()),
-            pipelineHandle->getColorFrames(),
-            pipelineHandle->getColorOutput(),
-            pipelineHandle->getHandTrackingOutput(),
-            pipelineHandle->getHandTrackingPalmFrameInput(),
-            pipelineHandle->getHandTrackingLandmarkConfig(),
-            pipelineHandle->getHandTrackingLandmarkFrameInput(),
-            pipelineHandle->getHandTrackingLandmarkOutput(),
-            pipelineHandle->getHandTrackingSpatialConfigInput(),
-            pipelineHandle->getHandTrackingSpatialOutput());
-    } catch(const std::exception &e) {
-        if (errorMsg != nullptr) {
-            strncpy(errorMsg, e.what(), 1000 - 1);
-            errorMsg[1000 - 1] = '\0'; // Ensure null-termination
-        } else {
-            return nullptr;
-        }
-    } catch (...) {
-        if (errorMsg != nullptr) {
-            strncpy(errorMsg, "Unknown native exception while starting the DepthAI session.", 1000 - 1);
-            errorMsg[1000 - 1] = '\0';
-        }
+    if (pipelineHandle == nullptr) {
+        copyError(errorMsg, "The pipeline was not created.");
         return nullptr;
+    }
+    g_lastError.clear();
+    try {
+        std::unique_ptr<spectacularAI::daiPlugin::Session> session =
+            pipelineHandle->getHandle()->startSession(*pipelineHandle->getDevice());
+
+        if (envEnabled("SAI_HAND_BENCH")) {
+            // Host -> device -> host round trip time for different message sizes under the real pipeline load
+            dai::Device& device = *pipelineHandle->getDevice();
+            auto input = device.getInputQueue("sai_bench_in", 4, false);
+            auto output = device.getOutputQueue("sai_bench_out", 4, false);
+            for (std::size_t size : {1024u, 49152u, 150528u, 300000u}) {
+                std::vector<double> times;
+                for (int i = 0; i < 60; ++i) {
+                    auto message = std::make_shared<dai::Buffer>();
+                    message->setData(std::vector<std::uint8_t>(size, 1));
+                    const auto start = std::chrono::steady_clock::now();
+                    input->send(message);
+                    bool timedOut = false;
+                    output->get<dai::Buffer>(std::chrono::milliseconds(2000), timedOut);
+                    if (timedOut) break;
+                    times.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+                }
+                if (times.size() > 10) {
+                    std::sort(times.begin(), times.end());
+                    std::clog << "[sai-hand] bench loopback " << size << " bytes: median " << times[times.size() / 2]
+                        << " ms, p90 " << times[times.size() * 9 / 10] << " ms, max " << times.back() << " ms" << std::endl;
+                }
+            }
+        }
+
+        std::unique_ptr<saiHandTracking::HandTracker> handTracker;
+        const HandTrackingSetup& handTracking = pipelineHandle->getHandTracking();
+        std::shared_ptr<ColorFrameQueue> colorFrames = pipelineHandle->getColorFrames();
+        if (handTracking.enabled) {
+            handTracker.reset(new saiHandTracking::HandTracker(
+                handTracking.settings,
+                handTracking.endpoints,
+                handTracking.intrinsics,
+                [colorFrames](std::shared_ptr<dai::ImgFrame> frame) { colorFrames->push(frame); }));
+        }
+        return new SessionWrapper(
+            std::move(session), colorFrames, pipelineHandle->getColorOutput(), std::move(handTracker));
+    } catch(const std::exception &e) {
+        copyError(errorMsg, e.what());
+    } catch (...) {
+        copyError(errorMsg, "Unknown native exception while starting the DepthAI session.");
     }
 
     return nullptr;
+}
+
+void sai_depthai_pipeline_print_device_stats(PipelineWrapper* pipelineHandle) {
+    assert(pipelineHandle);
+    try {
+        dai::Device& device = *pipelineHandle->getDevice();
+        const auto css = device.getLeonCssCpuUsage();
+        const auto mss = device.getLeonMssCpuUsage();
+        const auto ddr = device.getDdrMemoryUsage();
+        const auto cmx = device.getCmxMemoryUsage();
+        const auto temperature = device.getChipTemperature();
+        std::clog << "[sai-hand] device: leonCSS " << css.average * 100.0f << "% leonMSS " << mss.average * 100.0f
+            << "% ddr " << ddr.used / (1024 * 1024) << "/" << ddr.total / (1024 * 1024) << " MB"
+            << " cmx " << cmx.used / 1024 << "/" << cmx.total / 1024 << " kB"
+            << " temp " << temperature.average << " C" << std::endl;
+    } catch (const std::exception& e) {
+        std::clog << "[sai-hand] device stats failed: " << e.what() << std::endl;
+    }
+}
+
+int sai_depthai_get_last_error(char* buffer, int bufferSize) {
+    if (buffer == nullptr || bufferSize <= 0) return static_cast<int>(g_lastError.size());
+    strncpy(buffer, g_lastError.c_str(), static_cast<std::size_t>(bufferSize) - 1);
+    buffer[bufferSize - 1] = '\0';
+    return static_cast<int>(g_lastError.size());
 }
 
 void sai_depthai_pipeline_release(PipelineWrapper* pipelineHandle) {
@@ -505,12 +374,15 @@ VioOutputWrapper* sai_depthai_session_wait_for_output(SessionWrapper* sessionHan
 
 ColorFrameWrapper* sai_depthai_session_get_color_frame(const SessionWrapper* sessionHandle) {
     assert(sessionHandle);
-    if (const auto colorOutput = sessionHandle->getColorOutput()) {
-        std::shared_ptr<dai::ImgFrame> frame;
-        while (auto nextFrame = colorOutput->tryGet<dai::ImgFrame>()) {
-            frame = nextFrame;
+    // With hand tracking the worker thread reads the color queue. Otherwise read it here.
+    if (!sessionHandle->getHandTracker()) {
+        if (const auto colorOutput = sessionHandle->getColorOutput()) {
+            std::shared_ptr<dai::ImgFrame> frame;
+            while (auto nextFrame = colorOutput->tryGet<dai::ImgFrame>()) {
+                frame = nextFrame;
+            }
+            if (frame) sessionHandle->getColorFrames()->push(frame);
         }
-        if (frame) sessionHandle->getColorFrames()->push(frame);
     }
 
     std::shared_ptr<dai::ImgFrame> frame = sessionHandle->getColorFrames()->getLatest();
@@ -552,271 +424,89 @@ void sai_color_frame_release(const ColorFrameWrapper* colorFrameHandle) {
     if (colorFrameHandle) delete colorFrameHandle;
 }
 
-HandTrackingOutputWrapper* sai_depthai_session_get_hand_tracking_output(
-        const SessionWrapper* sessionHandle) {
+int sai_hand_tracking_float_stride() {
+    return saiHandTracking::kHandFloatStride;
+}
+
+int sai_depthai_session_get_hand_frame(
+        const SessionWrapper* sessionHandle,
+        int64_t afterSequence,
+        int64_t* sequence,
+        double* deviceTimestamp,
+        double* latencyMs,
+        float* buffer,
+        int bufferFloats) {
     assert(sessionHandle);
-    const auto outputQueue = sessionHandle->getHandTrackingOutput();
-    if (!outputQueue) return nullptr;
+    const saiHandTracking::HandTracker* tracker = sessionHandle->getHandTracker();
+    if (tracker == nullptr) return -2;
+    const std::shared_ptr<const saiHandTracking::HandFrame> frame = tracker->getLatest();
+    if (!frame || frame->sequence <= afterSequence) return -1;
 
-    const auto colorFrame = sessionHandle->getColorFrames()->getLatest();
-    const auto palmFrameInputQueue = sessionHandle->getHandTrackingPalmFrameInput();
-    auto* mutableSession = const_cast<SessionWrapper*>(sessionHandle);
-    if (colorFrame && palmFrameInputQueue &&
-        colorFrame->getSequenceNum() != mutableSession->getLastHandTrackingPalmConfigSequence()) {
-        palmFrameInputQueue->send(createPalmInput(colorFrame));
-        mutableSession->setLastHandTrackingPalmConfigSequence(colorFrame->getSequenceNum());
+    if (sequence) *sequence = frame->sequence;
+    if (deviceTimestamp) *deviceTimestamp = frame->deviceTimestamp;
+    if (latencyMs) *latencyMs = frame->latencyMs;
+
+    const int stride = saiHandTracking::kHandFloatStride;
+    const int capacity = buffer != nullptr ? bufferFloats / stride : 0;
+    const int count = std::min(static_cast<int>(frame->hands.size()), capacity);
+    for (int i = 0; i < count; ++i) {
+        const saiHandTracking::TrackedHand& hand = frame->hands[i];
+        float* out = buffer + i * stride;
+        out[0] = static_cast<float>(hand.id);
+        out[1] = hand.landmarkScore;
+        out[2] = hand.handedness;
+        out[3] = static_cast<float>(hand.gesture);
+        out[4] = hand.rotation;
+        out[5] = hand.handScale;
+        out[6] = hand.stereoDepth;
+        out[7] = hand.placed ? 1.0f : 0.0f;
+        std::copy(hand.imageLandmarks.begin(), hand.imageLandmarks.end(), out + 8);
+        std::copy(hand.cameraLandmarks.begin(), hand.cameraLandmarks.end(), out + 8 + 63);
+        std::copy(hand.worldLandmarks.begin(), hand.worldLandmarks.end(), out + 8 + 126);
     }
+    return count;
+}
 
-    std::shared_ptr<dai::NNData> inference;
-    while (auto nextInference = outputQueue->tryGet<dai::NNData>()) {
-        inference = nextInference;
+bool sai_depthai_session_get_hand_info(
+        const SessionWrapper* sessionHandle,
+        float* intrinsics,
+        int* width,
+        int* height) {
+    assert(sessionHandle);
+    const saiHandTracking::HandTracker* tracker = sessionHandle->getHandTracker();
+    if (tracker == nullptr) return false;
+    const saiHandTracking::Intrinsics& k = tracker->getIntrinsics();
+    if (intrinsics) {
+        intrinsics[0] = k.fx;
+        intrinsics[1] = k.fy;
+        intrinsics[2] = k.cx;
+        intrinsics[3] = k.cy;
     }
-    const auto landmarkFrameInputQueue = sessionHandle->getHandTrackingLandmarkFrameInput();
-    const auto landmarkOutputQueue = sessionHandle->getHandTrackingLandmarkOutput();
-
-    if (inference && !landmarkOutputQueue) {
-        std::vector<float> scores = inference->getLayerFp16("classificators");
-        std::vector<float> regressors = inference->getLayerFp16("regressors");
-        if (scores.empty() || regressors.empty()) return nullptr;
-        std::vector<saiHandTracking::PalmDetection> detections =
-            saiHandTracking::decodePalmDetections(scores, regressors, 0.5f, false);
-        const std::size_t decodedCount = detections.size();
-        detections = saiHandTracking::suppressPalmDetections(std::move(detections), 0.3f, 2);
-        logPalmInference(
-            *inference,
-            colorFrame ? colorFrame->getSequenceNum() : -1,
-            scores,
-            regressors,
-            decodedCount,
-            detections.size());
-        mutableSession->setLatestHandTrackingOutput(
-            std::move(detections),
-            inference->getSequenceNum(),
-            std::chrono::duration<double>(inference->getTimestampDevice().time_since_epoch()).count());
-        return new HandTrackingOutputWrapper(
-            mutableSession->getLatestHandTrackingDetections(),
-            mutableSession->getLatestHandTrackingSequenceNumber(),
-            mutableSession->getLatestHandTrackingTimestamp());
-    }
-
-    const auto palmSourceFrame = inference ?
-        sessionHandle->getColorFrames()->getBySequence(inference->getSequenceNum()) : nullptr;
-    const auto landmarkSourceFrame = palmSourceFrame ? palmSourceFrame : colorFrame;
-    const float imageWidth = landmarkSourceFrame ?
-        static_cast<float>(landmarkSourceFrame->getWidth()) : 640.0f;
-    const float imageHeight = landmarkSourceFrame ?
-        static_cast<float>(landmarkSourceFrame->getHeight()) : 360.0f;
-    auto& pending = mutableSession->getPendingHandTrackingOutputs();
-    if (inference) {
-        std::vector<float> scores = inference->getLayerFp16("classificators");
-        std::vector<float> regressors = inference->getLayerFp16("regressors");
-        if (scores.empty() || regressors.empty()) return nullptr;
-        std::vector<saiHandTracking::PalmDetection> detections =
-            saiHandTracking::decodePalmDetections(scores, regressors, 0.5f, false);
-        const std::size_t decodedCount = detections.size();
-        detections = saiHandTracking::suppressPalmDetections(std::move(detections), 0.3f, 2);
-        logPalmInference(
-            *inference,
-            colorFrame ? colorFrame->getSequenceNum() : -1,
-            scores,
-            regressors,
-            decodedCount,
-            detections.size());
-        for (const auto& detection : detections) {
-            if (landmarkSourceFrame && landmarkFrameInputQueue) {
-                landmarkFrameInputQueue->send(createLandmarkInput(
-                    landmarkSourceFrame, detection, inference->getSequenceNum()));
-            }
-        }
-
-        pending.push_back({
-            std::move(detections),
-            inference->getSequenceNum(),
-            std::chrono::duration<double>(
-                inference->getTimestampDevice().time_since_epoch()).count(),
-            0});
-        while (pending.size() > 4) pending.pop_front();
-    }
-
-    while (auto landmarkInference = landmarkOutputQueue->tryGet<dai::NNData>()) {
-        while (!pending.empty() &&
-               pending.front().nextLandmarkIndex >= pending.front().detections.size()) {
-            pending.pop_front();
-        }
-        if (pending.empty()) break;
-
-        auto& frame = pending.front();
-        auto& detection = frame.detections[frame.nextLandmarkIndex++];
-        const std::vector<float> score = landmarkInference->hasLayer("Identity_1") ?
-            landmarkInference->getLayerFp16("Identity_1") : std::vector<float>();
-        const std::vector<float> handedness = landmarkInference->hasLayer("Identity_2") ?
-            landmarkInference->getLayerFp16("Identity_2") : std::vector<float>();
-        const std::vector<float> landmarks = landmarkInference->hasLayer("Identity_dense/BiasAdd/Add") ?
-            landmarkInference->getLayerFp16("Identity_dense/BiasAdd/Add") : std::vector<float>();
-        const std::vector<float> worldLandmarks = landmarkInference->hasLayer("Identity_3_dense/BiasAdd/Add") ?
-            landmarkInference->getLayerFp16("Identity_3_dense/BiasAdd/Add") : std::vector<float>();
-        logLandmarkInference(*landmarkInference, score, handedness, landmarks, worldLandmarks);
-        const saiHandTracking::LandmarkRoi roi =
-            saiHandTracking::calculateLandmarkRoi(detection, imageWidth, imageHeight);
-        saiHandTracking::decodeLandmark(
-            detection, score, handedness, landmarks, worldLandmarks, roi, imageWidth, imageHeight);
-    }
-
-    while (!pending.empty() && pending.front().nextLandmarkIndex >= pending.front().detections.size()) {
-        PendingHandTrackingOutput completed = std::move(pending.front());
-        pending.pop_front();
-        completed.detections.erase(
-            std::remove_if(
-                completed.detections.begin(),
-                completed.detections.end(),
-                [](const saiHandTracking::PalmDetection& detection) {
-                    return !detection.hasLandmarks;
-                }),
-            completed.detections.end());
-        const auto spatialConfigInput = sessionHandle->getHandTrackingSpatialConfigInput();
-        const auto spatialOutputQueue = sessionHandle->getHandTrackingSpatialOutput();
-        if (!completed.detections.empty() && spatialConfigInput && spatialOutputQueue) {
-            std::vector<dai::SpatialLocationCalculatorConfigData> roiConfigs;
-            roiConfigs.reserve(completed.detections.size());
-            for (const auto& detection : completed.detections) {
-                roiConfigs.push_back(createWristSpatialConfig(detection, imageWidth, imageHeight));
-            }
-
-            dai::SpatialLocationCalculatorConfig spatialConfig;
-            spatialConfig.setROIs(std::move(roiConfigs));
-            spatialConfigInput->send(spatialConfig);
-
-            const auto spatialData = spatialOutputQueue->get<dai::SpatialLocationCalculatorData>();
-            const auto& spatialLocations = spatialData->getSpatialLocations();
-            const std::size_t spatialCount = std::min(
-                completed.detections.size(),
-                spatialLocations.size());
-            for (std::size_t index = 0; index < spatialCount; ++index) {
-                const auto& coordinates = spatialLocations[index].spatialCoordinates;
-                if (spatialLocations[index].depthAveragePixelCount == 0 || coordinates.z <= 0.0f) {
-                    continue;
-                }
-                completed.detections[index].spatialXYZ = {
-                    coordinates.x,
-                    coordinates.y,
-                    coordinates.z};
-                completed.detections[index].hasSpatialXYZ = true;
-            }
-        }
-        mutableSession->setLatestHandTrackingOutput(
-            completed.detections,
-            completed.sequenceNumber,
-            completed.timestamp);
-        return new HandTrackingOutputWrapper(
-            std::move(completed.detections), completed.sequenceNumber, completed.timestamp);
-    }
-
-    if (!mutableSession->hasLatestHandTrackingOutput()) return nullptr;
-    return new HandTrackingOutputWrapper(
-        mutableSession->getLatestHandTrackingDetections(),
-        mutableSession->getLatestHandTrackingSequenceNumber(),
-        mutableSession->getLatestHandTrackingTimestamp());
+    const std::shared_ptr<dai::ImgFrame> color = sessionHandle->getColorFrames()->getLatest();
+    if (width) *width = color ? static_cast<int>(color->getWidth()) : 0;
+    if (height) *height = color ? static_cast<int>(color->getHeight()) : 0;
+    return k.valid();
 }
 
-int sai_hand_tracking_output_get_count(const HandTrackingOutputWrapper* outputHandle) {
-    assert(outputHandle);
-    return static_cast<int>(outputHandle->getDetections().size());
+bool sai_depthai_session_get_hand_status(
+        const SessionWrapper* sessionHandle,
+        float* chipTemperature,
+        int* throttleLevel,
+        bool* stalled) {
+    assert(sessionHandle);
+    const saiHandTracking::HandTracker* tracker = sessionHandle->getHandTracker();
+    if (tracker == nullptr) return false;
+    const saiHandTracking::HandTrackerStatus status = tracker->getStatus();
+    if (chipTemperature) *chipTemperature = status.chipTemperature;
+    if (throttleLevel) *throttleLevel = status.throttleLevel;
+    if (stalled) *stalled = status.stalled;
+    return true;
 }
 
-int64_t sai_hand_tracking_output_get_sequence_number(const HandTrackingOutputWrapper* outputHandle) {
-    assert(outputHandle);
-    return outputHandle->getSequenceNumber();
-}
-
-double sai_hand_tracking_output_get_timestamp(const HandTrackingOutputWrapper* outputHandle) {
-    assert(outputHandle);
-    return outputHandle->getTimestamp();
-}
-
-float sai_hand_tracking_output_get_score(
-        const HandTrackingOutputWrapper* outputHandle,
-        int detectionIndex) {
-    assert(outputHandle);
-    return outputHandle->getDetections().at(detectionIndex).score;
-}
-
-float sai_hand_tracking_output_get_box_value(
-        const HandTrackingOutputWrapper* outputHandle,
-        int detectionIndex,
-        int valueIndex) {
-    assert(outputHandle);
-    return outputHandle->getDetections().at(detectionIndex).box.at(valueIndex);
-}
-
-float sai_hand_tracking_output_get_keypoint_value(
-        const HandTrackingOutputWrapper* outputHandle,
-        int detectionIndex,
-        int valueIndex) {
-    assert(outputHandle);
-    return outputHandle->getDetections().at(detectionIndex).keypoints.at(valueIndex);
-}
-
-float sai_hand_tracking_output_get_landmark_score(
-        const HandTrackingOutputWrapper* outputHandle,
-        int detectionIndex) {
-    assert(outputHandle);
-    return outputHandle->getDetections().at(detectionIndex).landmarkScore;
-}
-
-float sai_hand_tracking_output_get_handedness(
-        const HandTrackingOutputWrapper* outputHandle,
-        int detectionIndex) {
-    assert(outputHandle);
-    return outputHandle->getDetections().at(detectionIndex).handedness;
-}
-
-int sai_hand_tracking_output_get_gesture(
-        const HandTrackingOutputWrapper* outputHandle,
-        int detectionIndex) {
-    assert(outputHandle);
-    return outputHandle->getDetections().at(detectionIndex).gesture;
-}
-
-float sai_hand_tracking_output_get_landmark_value(
-        const HandTrackingOutputWrapper* outputHandle,
-        int detectionIndex,
-        int valueIndex) {
-    assert(outputHandle);
-    return outputHandle->getDetections().at(detectionIndex).landmarks.at(valueIndex);
-}
-
-float sai_hand_tracking_output_get_world_landmark_value(
-        const HandTrackingOutputWrapper* outputHandle,
-        int detectionIndex,
-        int valueIndex) {
-    assert(outputHandle);
-    return outputHandle->getDetections().at(detectionIndex).worldLandmarks.at(valueIndex);
-}
-
-bool sai_hand_tracking_output_has_spatial_xyz(
-        const HandTrackingOutputWrapper* outputHandle,
-        int detectionIndex) {
-    assert(outputHandle);
-    return outputHandle->getDetections().at(detectionIndex).hasSpatialXYZ;
-}
-
-float sai_hand_tracking_output_get_spatial_xyz_value(
-        const HandTrackingOutputWrapper* outputHandle,
-        int detectionIndex,
-        int valueIndex) {
-    assert(outputHandle);
-    return outputHandle->getDetections().at(detectionIndex).spatialXYZ.at(valueIndex);
-}
-
-float sai_hand_tracking_output_get_rotation_degrees(
-        const HandTrackingOutputWrapper* outputHandle,
-        int detectionIndex) {
-    assert(outputHandle);
-    return outputHandle->getDetections().at(detectionIndex).rotationDegrees;
-}
-
-void sai_hand_tracking_output_release(const HandTrackingOutputWrapper* outputHandle) {
-    if (outputHandle) delete outputHandle;
+bool sai_depthai_session_hand_replay_finished(const SessionWrapper* sessionHandle) {
+    assert(sessionHandle);
+    const saiHandTracking::HandTracker* tracker = sessionHandle->getHandTracker();
+    return tracker != nullptr && tracker->isReplayFinished();
 }
 
 void sai_depthai_session_add_trigger(

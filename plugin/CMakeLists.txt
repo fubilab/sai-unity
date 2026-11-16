@@ -19,6 +19,7 @@ set(PLUGIN_SRC
   src/depthai.cpp
   src/mapping.cpp
   src/hand_tracking.cpp
+  src/hand_tracker.cpp
 )
 
 set(PLUGIN_LIBS

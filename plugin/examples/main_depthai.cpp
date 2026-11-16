@@ -11,6 +11,9 @@
 #include <chrono>
 #include <thread>
 #include <string>
+#include <fstream>
+#include <cstdlib>
+#include <cstring>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -20,17 +23,6 @@
 #endif
 
 namespace {
-
-struct PreviewDetection {
-    float score = 0.0f;
-    float landmarkScore = 0.0f;
-    float handedness = 0.5f;
-    int gesture = -1;
-    std::array<float, 4> box{};
-    std::array<float, 14> keypoints{};
-    std::array<float, 63> landmarks{};
-    bool hasLandmarks = false;
-};
 
 #ifdef _WIN32
 class NativePreviewWindow {
@@ -238,78 +230,49 @@ void drawCircle(
     }
 }
 
-int squareCoordinate(float normalizedCoordinate, int imageWidth, int imageHeight, bool horizontal) {
-    const int frameSize = std::max(imageWidth, imageHeight);
-    const int padding = horizontal ? (frameSize - imageWidth) / 2 : (frameSize - imageHeight) / 2;
-    return static_cast<int>(std::lround(normalizedCoordinate * frameSize - padding));
-}
-
 int imageCoordinate(float normalizedCoordinate, int imageSize) {
     return static_cast<int>(std::lround(normalizedCoordinate * imageSize));
 }
 
-void drawDetection(
+struct PreviewHand {
+    float landmarkScore = 0.0f;
+    float handedness = 0.5f;
+    int gesture = 0;
+    float stereoDepth = 0.0f;
+    float handScale = 1.0f;
+    bool placed = false;
+    std::array<float, 63> image{};
+    std::array<float, 63> camera{};
+};
+
+void drawHand(
         std::vector<std::uint8_t>& pixels,
         int width,
         int height,
-        const PreviewDetection& detection) {
-    const int left = squareCoordinate(detection.box[0], width, height, true);
-    const int top = squareCoordinate(detection.box[1], width, height, false);
-    const int right = squareCoordinate(detection.box[0] + detection.box[2], width, height, true);
-    const int bottom = squareCoordinate(detection.box[1] + detection.box[3], width, height, false);
-    for (int offset = 0; offset < 3; ++offset) {
-        drawLine(pixels, width, height, left, top + offset, right, top + offset, 0, 255, 0);
-        drawLine(pixels, width, height, left, bottom - offset, right, bottom - offset, 0, 255, 0);
-        drawLine(pixels, width, height, left + offset, top, left + offset, bottom, 0, 255, 0);
-        drawLine(pixels, width, height, right - offset, top, right - offset, bottom, 0, 255, 0);
-    }
-
-    for (int keypointIndex = 0; keypointIndex < 7; ++keypointIndex) {
-        drawCircle(
-            pixels,
-            width,
-            height,
-            squareCoordinate(detection.keypoints[keypointIndex * 2], width, height, true),
-            squareCoordinate(detection.keypoints[keypointIndex * 2 + 1], width, height, false),
-            4,
-            0,
-            0,
-            255);
-    }
-
-    if (!detection.hasLandmarks) return;
+        const PreviewHand& hand) {
     constexpr int handLines[][2] = {
         {0, 1}, {1, 2}, {2, 3}, {3, 4}, {0, 5}, {5, 6}, {6, 7}, {7, 8},
         {5, 9}, {9, 10}, {10, 11}, {11, 12}, {9, 13}, {13, 14}, {14, 15}, {15, 16},
         {13, 17}, {17, 18}, {18, 19}, {19, 20}, {0, 17}};
+    // right hand green, left hand orange (BGR)
+    const std::uint8_t blue = 0;
+    const std::uint8_t green = hand.handedness > 0.5f ? 255 : 165;
+    const std::uint8_t red = hand.handedness > 0.5f ? 0 : 255;
     for (const auto& line : handLines) {
         const int start = line[0] * 3;
         const int end = line[1] * 3;
         drawLine(
-            pixels,
-            width,
-            height,
-            imageCoordinate(detection.landmarks[start], width),
-            imageCoordinate(detection.landmarks[start + 1], height),
-            imageCoordinate(detection.landmarks[end], width),
-            imageCoordinate(detection.landmarks[end + 1], height),
-            255,
-            220,
-            0,
-            3);
+            pixels, width, height,
+            imageCoordinate(hand.image[start], width), imageCoordinate(hand.image[start + 1], height),
+            imageCoordinate(hand.image[end], width), imageCoordinate(hand.image[end + 1], height),
+            blue, green, red, 2);
     }
     for (int landmarkIndex = 0; landmarkIndex < 21; ++landmarkIndex) {
         const int valueIndex = landmarkIndex * 3;
         drawCircle(
-            pixels,
-            width,
-            height,
-            imageCoordinate(detection.landmarks[valueIndex], width),
-            imageCoordinate(detection.landmarks[valueIndex + 1], height),
-            4,
-            255,
-            255,
-            255);
+            pixels, width, height,
+            imageCoordinate(hand.image[valueIndex], width), imageCoordinate(hand.image[valueIndex + 1], height),
+            3, 0, 0, 255);
     }
 }
 
@@ -328,25 +291,6 @@ void convertPlanarRgbToBgra(
     }
 }
 
-PreviewDetection copyDetection(const HandTrackingOutputWrapper* output, int index) {
-    PreviewDetection detection;
-    detection.score = sai_hand_tracking_output_get_score(output, index);
-    detection.landmarkScore = sai_hand_tracking_output_get_landmark_score(output, index);
-    detection.handedness = sai_hand_tracking_output_get_handedness(output, index);
-    detection.gesture = sai_hand_tracking_output_get_gesture(output, index);
-    for (int valueIndex = 0; valueIndex < 4; ++valueIndex) {
-        detection.box[valueIndex] = sai_hand_tracking_output_get_box_value(output, index, valueIndex);
-    }
-    for (int valueIndex = 0; valueIndex < 14; ++valueIndex) {
-        detection.keypoints[valueIndex] = sai_hand_tracking_output_get_keypoint_value(output, index, valueIndex);
-    }
-    for (int valueIndex = 0; valueIndex < 63; ++valueIndex) {
-        detection.landmarks[valueIndex] = sai_hand_tracking_output_get_landmark_value(output, index, valueIndex);
-    }
-    detection.hasLandmarks = detection.landmarkScore > 0.5f;
-    return detection;
-}
-
 std::string gestureName(int gesture) {
     switch (gesture) {
     case 1: return "ONE";
@@ -357,13 +301,16 @@ std::string gestureName(int gesture) {
     case 6: return "FIST";
     case 7: return "OK";
     case 8: return "PEACE";
-    default: return "UNKNOWN";
+    default: return "-";
     }
 }
 
 }
 
 int main(int argc, char *argv[]) {
+    // usage: main_depthai [palm_detection.blob hand_landmark.blob]
+    // environment: SAI_RECORD_DIR, SAI_RUN_SECONDS, SAI_IR_PROJECTOR (0..1), SAI_HAND_NO_DEPTH,
+    //              SAI_HAND_REPLAY (color.raw), SAI_HAND_LOG (jsonl), SAI_HAND_TRACKING_DEBUG
     ConfigurationWrapper config;
     config.lowLatency = true;
     config.useColor = true;
@@ -372,6 +319,15 @@ int main(int argc, char *argv[]) {
         config.handTrackingPalmModelPath = argv[1];
         config.handTrackingLandmarkModelPath = argv[2];
     }
+    if (const char* ir = std::getenv("SAI_IR_PROJECTOR")) config.handTrackingIrProjectorIntensity = static_cast<float>(std::atof(ir));
+    if (std::getenv("SAI_HAND_NO_DEPTH")) config.handTrackingUseDepth = false;
+    const bool replaying = std::getenv("SAI_HAND_REPLAY") != nullptr;
+    // Diagnostics: toggle SAI components to see how they affect the hand tracking networks
+    if (const char* v = std::getenv("SAI_USE_COLOR")) config.useColor = std::atoi(v) != 0;
+    if (const char* v = std::getenv("SAI_USE_STEREO")) config.useStereo = std::atoi(v) != 0;
+    if (const char* v = std::getenv("SAI_USE_FEATURE_TRACKER")) config.useFeatureTracker = std::atoi(v) != 0;
+    if (const char* v = std::getenv("SAI_FAST_VIO")) config.fastVio = std::atoi(v) != 0;
+    if (const char* v = std::getenv("SAI_LOW_LATENCY")) config.lowLatency = std::atoi(v) != 0;
 
     // SLAM callback
     callback_t_mapper_output onMapperOutput = [](const MapperOutputWrapper* mapperOutput) {
@@ -386,9 +342,9 @@ int main(int argc, char *argv[]) {
     };
 
     std::array<char, 1000> errorMessage{};
-    PipelineWrapper* pipeline = sai_depthai_pipeline_build(
-        &config, nullptr, 0, onMapperOutput, errorMessage.data());
+    PipelineWrapper* pipeline = sai_depthai_pipeline_build(&config, nullptr, 0, onMapperOutput);
     if (!pipeline) {
+        sai_depthai_get_last_error(errorMessage.data(), static_cast<int>(errorMessage.size()));
         std::cerr << "Pipeline build failed: " << errorMessage.data() << std::endl;
         return 1;
     }
@@ -402,20 +358,41 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    // Optional raw recorder (SAI_RECORD_DIR): exactly the color frames the hand pipeline sees,
+    // plus VIO poses and RGB camera intrinsics, so they can be replayed offline (SAI_HAND_REPLAY).
+    const char* recordDirEnv = std::getenv("SAI_RECORD_DIR");
+    std::ofstream recordColor, recordVio;
+    bool recordIntrinsicsWritten = false;
+    const auto recordStart = std::chrono::steady_clock::now();
+    const auto hostSeconds = [recordStart]() {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - recordStart).count();
+    };
+    if (recordDirEnv != nullptr && recordDirEnv[0] != '\0') {
+        const std::string recordDir = recordDirEnv;
+        if (!std::getenv("SAI_RECORD_NO_COLOR")) recordColor.open(recordDir + "/color.raw", std::ios::binary);
+        recordVio.open(recordDir + "/vio.jsonl");
+        std::cout << "recording to " << recordDir << std::endl;
+    }
+    int runSeconds = replaying ? 3600 : 30;
+    if (const char* runSecondsEnv = std::getenv("SAI_RUN_SECONDS")) runSeconds = std::max(1, std::atoi(runSecondsEnv));
+
     int counter = 0;
     int64_t lastColorSequence = -1;
-    int64_t lastPalmSequence = -1;
-    int handPollCount = 0;
-    std::vector<PreviewDetection> latestDetections;
+    int64_t lastHandSequence = -1;
+    const int handStride = sai_hand_tracking_float_stride();
+    std::vector<float> handBuffer(static_cast<std::size_t>(handStride) * 2);
+    std::vector<PreviewHand> latestHands;
+    double latestHandLatency = 0.0;
     std::vector<std::uint8_t> previewPixels;
 #ifdef _WIN32
     NativePreviewWindow previewWindow;
     bool previewCreated = false;
 #endif
     auto nextStatusTime = std::chrono::steady_clock::now();
-    const auto deadline = nextStatusTime + std::chrono::seconds(30);
+    const auto deadline = nextStatusTime + std::chrono::seconds(runSeconds);
+    int handFrames = 0;
+    auto nextDeviceStats = std::chrono::steady_clock::now();
     while (std::chrono::steady_clock::now() < deadline) {
-        ++handPollCount;
         int colorWidth = 0;
         int colorHeight = 0;
         bool hasColorFrame = false;
@@ -433,52 +410,75 @@ int main(int argc, char *argv[]) {
                 hasColorFrame = true;
             }
             if (colorSequence != lastColorSequence) {
-                std::cout << "color frame " << colorSequence << " ("
-                    << colorWidth << "x" << colorHeight << ")" << std::endl;
                 lastColorSequence = colorSequence;
+                if (recordColor.is_open() && data != nullptr && dataSize >= pixelCount * 3) {
+                    struct RecordHeader {
+                        int64_t sequence;
+                        double deviceTimestamp;
+                        double hostTime;
+                        int32_t width;
+                        int32_t height;
+                        int32_t dataSize;
+                        int32_t reserved;
+                    } header{
+                        colorSequence,
+                        sai_color_frame_get_timestamp(colorFrame),
+                        hostSeconds(),
+                        colorWidth,
+                        colorHeight,
+                        static_cast<int32_t>(pixelCount * 3),
+                        0};
+                    recordColor.write(reinterpret_cast<const char*>(&header), sizeof(header));
+                    recordColor.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(pixelCount * 3));
+                }
             }
             sai_color_frame_release(colorFrame);
         }
 
-        HandTrackingOutputWrapper* handOutput =
-            sai_depthai_session_get_hand_tracking_output(session);
-        if (handOutput != nullptr) {
-            int64_t sequence = sai_hand_tracking_output_get_sequence_number(handOutput);
-            int detectionCount = sai_hand_tracking_output_get_count(handOutput);
-            if (sequence != lastPalmSequence) {
-                latestDetections.clear();
-                std::cout << "hand output " << sequence << " ("
-                    << detectionCount << " detections)" << std::endl;
-                for (int detectionIndex = 0; detectionIndex < detectionCount; ++detectionIndex) {
-                    latestDetections.push_back(copyDetection(handOutput, detectionIndex));
-                    std::cout << "  hand[" << detectionIndex << "]"
-                        << " palm="
-                        << sai_hand_tracking_output_get_score(handOutput, detectionIndex)
-                        << " landmark="
-                        << sai_hand_tracking_output_get_landmark_score(handOutput, detectionIndex)
-                        << " handedness="
-                        << sai_hand_tracking_output_get_handedness(handOutput, detectionIndex)
-                        << " gesture="
-                        << sai_hand_tracking_output_get_gesture(handOutput, detectionIndex)
-                        << std::endl;
+        if (config.enableHandTracking) {
+            int64_t handSequence = -1;
+            double handTimestamp = 0.0;
+            double handLatency = 0.0;
+            const int handCount = sai_depthai_session_get_hand_frame(
+                session, lastHandSequence, &handSequence, &handTimestamp, &handLatency,
+                handBuffer.data(), static_cast<int>(handBuffer.size()));
+            if (handCount >= 0) {
+                lastHandSequence = handSequence;
+                latestHandLatency = handLatency;
+                ++handFrames;
+                latestHands.clear();
+                for (int index = 0; index < handCount; ++index) {
+                    const float* block = handBuffer.data() + static_cast<std::size_t>(index) * handStride;
+                    PreviewHand hand;
+                    hand.landmarkScore = block[1];
+                    hand.handedness = block[2];
+                    hand.gesture = static_cast<int>(block[3]);
+                    hand.handScale = block[5];
+                    hand.stereoDepth = block[6];
+                    hand.placed = block[7] > 0.5f;
+                    std::copy(block + 8, block + 8 + 63, hand.image.begin());
+                    std::copy(block + 8 + 63, block + 8 + 126, hand.camera.begin());
+                    latestHands.push_back(hand);
                 }
-                lastPalmSequence = sequence;
             }
             if (std::chrono::steady_clock::now() >= nextStatusTime) {
-                std::cout << "hand status: latest sequence=" << sequence
-                    << ", detections=" << detectionCount << std::endl;
+                std::cout << "hands: " << latestHands.size() << " latency " << latestHandLatency << " ms, "
+                    << handFrames << " results/s";
+                for (const PreviewHand& hand : latestHands) {
+                    std::cout << " | " << (hand.handedness > 0.5f ? "R" : "L") << " " << gestureName(hand.gesture)
+                        << " lm=" << hand.landmarkScore << " wrist(cam)=" << hand.camera[0] << ","
+                        << hand.camera[1] << "," << hand.camera[2] << " stereo=" << hand.stereoDepth
+                        << " scale=" << hand.handScale;
+                }
+                std::cout << std::endl;
+                handFrames = 0;
                 nextStatusTime = std::chrono::steady_clock::now() + std::chrono::seconds(1);
             }
-            sai_hand_tracking_output_release(handOutput);
-        }
-        else if (std::chrono::steady_clock::now() >= nextStatusTime) {
-            std::cout << "hand status: no decoded output yet (poll "
-                << handPollCount << ")" << std::endl;
-            nextStatusTime = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+            if (replaying && sai_depthai_session_hand_replay_finished(session)) break;
         }
 
 #ifdef _WIN32
-        if (hasColorFrame) {
+        if (hasColorFrame && !replaying) {
             if (!previewCreated) {
                 previewCreated = previewWindow.create(colorWidth, colorHeight);
                 if (!previewCreated) {
@@ -486,32 +486,67 @@ int main(int argc, char *argv[]) {
                 }
             }
             if (previewCreated) {
-                for (const PreviewDetection& detection : latestDetections) {
-                    drawDetection(previewPixels, colorWidth, colorHeight, detection);
+                for (const PreviewHand& hand : latestHands) {
+                    drawHand(previewPixels, colorWidth, colorHeight, hand);
                 }
                 std::ostringstream title;
-                title << "SpectacularAI native hand tracking preview - frame=" << colorSequence
-                    << " hands=" << latestDetections.size();
-                for (std::size_t index = 0; index < latestDetections.size(); ++index) {
-                    const PreviewDetection& detection = latestDetections[index];
-                    title << " | " << index << ": palm=" << detection.score
-                        << " lm=" << detection.landmarkScore
-                        << " " << (detection.handedness > 0.5f ? "right" : "left")
-                        << " " << gestureName(detection.gesture);
+                title << "SpectacularAI native hand tracking - frame=" << colorSequence
+                    << " hands=" << latestHands.size() << " latency=" << static_cast<int>(latestHandLatency) << "ms";
+                for (const PreviewHand& hand : latestHands) {
+                    title << " | " << (hand.handedness > 0.5f ? "R" : "L") << " " << gestureName(hand.gesture)
+                        << " z=" << hand.camera[2] << "m";
                 }
                 previewWindow.setStatus(title.str());
                 previewWindow.update(previewPixels, colorWidth, colorHeight);
             }
         }
         if (previewCreated && !previewWindow.pumpMessages()) break;
+#else
+        (void)hasColorFrame;
 #endif
 
         if (sai_depthai_session_has_output(session)) {
             ++counter;
             VioOutputWrapper* output = sai_depthai_session_get_output(session);
             spectacularAI::Pose pose = sai_vio_output_get_pose(output);
-            std::cout << counter << ". position = " << pose.position.x << ", " << pose.position.y << ", " << pose.position.z << std::endl;
+            if (recordVio.is_open()) {
+                recordVio << "{\"t\":" << pose.time << ",\"host\":" << hostSeconds()
+                    << ",\"status\":" << static_cast<int>(sai_vio_output_get_tracking_status(output))
+                    << ",\"p\":[" << pose.position.x << ',' << pose.position.y << ',' << pose.position.z
+                    << "],\"q\":[" << pose.orientation.x << ',' << pose.orientation.y << ','
+                    << pose.orientation.z << ',' << pose.orientation.w << "]";
+                spectacularAI::CameraPose* rgbPose = sai_depthai_session_get_rgb_camera_pose(session, output);
+                if (rgbPose != nullptr) {
+                    const Matrix4dWrapper m = sai_camera_pose_get_camera_to_world_matrix(rgbPose);
+                    recordVio << ",\"rgb_c2w\":[" << m.m00 << ',' << m.m01 << ',' << m.m02 << ',' << m.m03 << ','
+                        << m.m10 << ',' << m.m11 << ',' << m.m12 << ',' << m.m13 << ','
+                        << m.m20 << ',' << m.m21 << ',' << m.m22 << ',' << m.m23 << ','
+                        << m.m30 << ',' << m.m31 << ',' << m.m32 << ',' << m.m33 << "]";
+                    if (!recordIntrinsicsWritten) {
+                        if (const CameraWrapper* camera = sai_camera_pose_get_camera(rgbPose)) {
+                            const Matrix3dWrapper k = sai_camera_get_intrinsic_matrix(camera);
+                            recordVio << ",\"rgb_intrinsics\":[" << k.m00 << ',' << k.m01 << ',' << k.m02 << ','
+                                << k.m10 << ',' << k.m11 << ',' << k.m12 << ','
+                                << k.m20 << ',' << k.m21 << ',' << k.m22 << "]";
+                            std::cout << "rgb intrinsics fx=" << k.m00 << " fy=" << k.m11
+                                << " cx=" << k.m02 << " cy=" << k.m12 << std::endl;
+                            recordIntrinsicsWritten = true;
+                        }
+                    }
+                    sai_camera_pose_release(rgbPose);
+                }
+                recordVio << "}\n";
+                recordVio.flush();
+            }
+            if (counter % 60 == 0) {
+                std::cout << counter << ". position = " << pose.position.x << ", " << pose.position.y << ", " << pose.position.z << std::endl;
+            }
             sai_vio_output_release(output); // must release memory!
+        }
+
+        if (std::getenv("SAI_HAND_TRACKING_DEBUG") && std::chrono::steady_clock::now() >= nextDeviceStats) {
+            sai_depthai_pipeline_print_device_stats(pipeline);
+            nextDeviceStats = std::chrono::steady_clock::now() + std::chrono::seconds(2);
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
