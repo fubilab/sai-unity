@@ -63,8 +63,7 @@ Notes
  1. `run_recording.ps1 -OutDir rec` runs `main_depthai` with spoken instructions and records the color frames
     (`color.raw`), the VIO poses and camera intrinsics.
  2. `ref_python_tracker.py rec rec/ref.jsonl --lm full` runs the original Python tracker on the same frames.
- 3. Replay the recording through the plugin with `SAI_HAND_REPLAY=rec\color.raw SAI_HAND_LOG=rec
-ative.jsonl`
+ 3. Replay the recording through the plugin with `SAI_HAND_REPLAY=rec\color.raw SAI_HAND_LOG=rec\native.jsonl`
     (`main_depthai.exe palm.blob landmark.blob`) and compare with `compare_tracks.py rec/ref.jsonl rec/native.jsonl`,
     or look at it with `render_overlay.py`. On a 55 s recording both trackers agree to ~0.85 px mean landmark error.
  4. `main_hand_tracking.exe` runs the unit tests of the algorithms.
@@ -72,17 +71,19 @@ ative.jsonl`
     Unity player hands test, static hand and ruler distance test), `analyze_player.py`, `analyze_world.py`,
     `thermal_runs.ps1` (chip temperature over time), `run_replay.ps1`. Their paths are set with environment
     variables, see the top of `guided_tests.ps1`.
+    `pinch_session.ps1 -OutDir pinch1` is a spoken session of pinches and other poses (13 poses, 2.5 min) and
+    `analyze_pinch.py pinch1` compares thumb-index features and thresholds for the pinch gesture.
 
 ## Run C++ examples (for debugging/testing)
 1. Live example with DepthAI devices. Connect DepthAI device and then run
 ```
-.\Release\main_depthai.exe path	o\palm_detection_sh4.blob path	o\hand_landmark_full_sh4.blob
+.\Release\main_depthai.exe path\to\palm_detection_sh4.blob path\to\hand_landmark_full_sh4.blob
 ```
 A window shows the camera image with the tracked hands. The terminal prints hand tracking latency and the position
 of the device. Without the blob arguments only the VIO runs.
 
 2. If you have recorded datasets, then you can replay them using
 ```
-.\Release\main_replay.exe path	oecording
+.\Release\main_replay.exe path\to\recording
 ```
 The position of the device should be printed in your terminal.
