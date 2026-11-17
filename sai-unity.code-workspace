@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../arml-sdk/arml-unity"
+		}
+	],
+	"settings": {}
+}

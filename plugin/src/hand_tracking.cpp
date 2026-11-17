@@ -201,7 +201,7 @@ std::vector<HandRegion> nonMaxSuppression(
     return selected;
 }
 
-void palmToRoi(HandRegion& region, float squareSize) {
+void palmToRoi(HandRegion& region, float squareSize, float cropX, float cropY) {
     // palm_detection_detection_to_roi.pbtxt: rotation from wrist center to middle finger MCP
     const float targetAngle = kPi * 0.5f;
     const float rectW = region.pdBox[2];
@@ -218,8 +218,8 @@ void palmToRoi(HandRegion& region, float squareSize) {
     const float shiftY = -0.5f;
     const float xShift = -squareSize * rectH * shiftY * std::sin(region.rotation);
     const float yShift = squareSize * rectH * shiftY * std::cos(region.rotation);
-    region.rectXCenter = xCenter * squareSize + xShift;
-    region.rectYCenter = yCenter * squareSize + yShift;
+    region.rectXCenter = xCenter * squareSize + xShift + cropX;
+    region.rectYCenter = yCenter * squareSize + yShift + cropY;
     const float longSide = std::max(rectW * squareSize, rectH * squareSize);
     region.rectSize = longSide * scaleXY;
     region.rectPoints = rotatedRectToPoints(
@@ -279,17 +279,18 @@ HandRegion roiFromLandmarks(const HandRegion& hand) {
 }
 
 void makePalmInput(
-        const std::uint8_t* planarRgb, int width, int height, std::vector<std::uint8_t>& out) {
+        const std::uint8_t* planarRgb, int width, int height, std::vector<std::uint8_t>& out,
+        float cropX, float cropY, float cropSize) {
     const int squareSize = std::max(width, height);
     const int padX = (squareSize - width) / 2;
     const int padY = (squareSize - height) / 2;
-    const float scale = static_cast<float>(squareSize) / kPalmInputSize;
+    const float scale = (cropSize > 0.0f ? cropSize : static_cast<float>(squareSize)) / kPalmInputSize;
     const std::size_t planeSize = static_cast<std::size_t>(width) * height;
     out.assign(static_cast<std::size_t>(kPalmInputSize) * kPalmInputSize * 3, 0);
     for (int y = 0; y < kPalmInputSize; ++y) {
-        const float sy = (y + 0.5f) * scale - 0.5f - padY;
+        const float sy = (y + 0.5f) * scale - 0.5f + cropY - padY;
         for (int x = 0; x < kPalmInputSize; ++x) {
-            const float sx = (x + 0.5f) * scale - 0.5f - padX;
+            const float sx = (x + 0.5f) * scale - 0.5f + cropX - padX;
             const std::size_t outIndex = static_cast<std::size_t>(y) * kPalmInputSize + x;
             for (int channel = 0; channel < 3; ++channel) {
                 // output is BGR, input is RGB

@@ -67,15 +67,24 @@ std::vector<HandRegion> nonMaxSuppression(
     float iouThreshold,
     std::size_t maxCount);
 
-/** Palm detection -> rotated ROI around the whole hand (square image side = squareSize). */
-void palmToRoi(HandRegion& region, float squareSize);
+/**
+ * Palm detection -> rotated ROI around the whole hand. The palm model input covered the square region of side
+ * cropSize with its top left corner at (cropX, cropY) in square-image pixels (the whole square image by default).
+ */
+void palmToRoi(HandRegion& region, float cropSize, float cropX = 0.0f, float cropY = 0.0f);
 
 /** Landmarks of this hand -> ROI for the next frame. Requires landmarks in square-image pixels. */
 HandRegion roiFromLandmarks(const HandRegion& hand);
 
-/** Resize the camera image (planar RGB, 3 planes) letterboxed into a planar BGR input for the palm model. */
+/**
+ * Resize the camera image (planar RGB, 3 planes) letterboxed into a planar BGR input for the palm model.
+ * With cropSize > 0 only the square region of that side with its top left corner at (cropX, cropY) in square-image
+ * pixels (the letterboxed square, so the image starts at the padding offset) is used: a hand fills more of the
+ * input of 128 x 128 pixels, which makes it much easier to find (see README).
+ */
 void makePalmInput(
-    const std::uint8_t* planarRgb, int width, int height, std::vector<std::uint8_t>& planarBgr128);
+    const std::uint8_t* planarRgb, int width, int height, std::vector<std::uint8_t>& planarBgr128,
+    float cropX = 0.0f, float cropY = 0.0f, float cropSize = 0.0f);
 
 /** Warp the rotated ROI of a hand out of the camera image into a planar BGR 224x224 landmark model input. */
 void makeLandmarkInput(

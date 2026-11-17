@@ -48,6 +48,11 @@ struct HandFrame {
     int width = 0;
     int height = 0;
     bool palmDetectionRan = false;
+    float palmBestScore = 0.0f;                  // best palm detection score of this frame (0..1), when palmDetectionRan
+    int skippedCandidates = 0;                   // diagnostics: palm candidates not run through the landmark model, see rejectionMemoryMs
+    int palmCrop = -1;                           // diagnostics: crop used by the palm detection (0 center, 1 left, 2 right, 3 whole frame)
+    float landmarkBestScore = 0.0f;              // best landmark confidence of this frame, also of rejected hands (diagnostics)
+    std::array<float, 4> firstRoi{};             // diagnostics: ROI of the first hand candidate: center x, y, size (square-image pixels), rotation (deg)
     std::vector<TrackedHand> hands;
 };
 
@@ -72,6 +77,14 @@ struct Settings {
     // Power and heat. The networks run on a device that is also busy with the VIO, which gets hot.
     // While no hand is tracked, palm detection is run at most every searchIntervalMs.
     int searchIntervalMs = 100;
+    // While searching, palm detection looks at one square crop of the frame per run, cycling through the center, the
+    // left, the right and the whole frame (letterboxed). A hand is far easier to find when it fills more of the 128 x
+    // 128 pixel input of the palm model: in the whole 16:9 frame a hand at arm's length is only ~30 pixels there.
+    bool searchCrops = true;
+    // A palm candidate that the landmark model rejected is not run through it again for this long (ms) when a
+    // candidate shows up at about the same place with a similar palm score: a spot of the scene (a poster, a hand-like
+    // shadow) scores above the palm threshold again and again and would cost a landmark run each time. 0 = off.
+    int rejectionMemoryMs = 3000;
     // Above this chip temperature (Celsius) the work is reduced in steps, see HandTrackerStatus
     float throttleStartC = 88.0f;
 };

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -114,6 +115,12 @@ struct HandTracker::Impl {
     bool warnedFrameType = false;
     std::function<void(std::shared_ptr<dai::ImgFrame>)> onColorFrame;
     int consecutiveTimeouts = 0;
+    int searchCropCounter = 0;
+    struct RejectedCandidate {
+        float x, y, size, score;
+        Clock::time_point time;
+    };
+    std::vector<RejectedCandidate> rejectedCandidates;
     Clock::time_point lastCycleStart = Clock::now() - std::chrono::seconds(10);
     Clock::time_point lastTemperaturePoll = Clock::now() - std::chrono::seconds(10);
     bool debug = false;
@@ -260,7 +267,22 @@ std::shared_ptr<HandFrame> HandTracker::Impl::process(
     if (!usedPreviousLandmarks) {
         const auto palmStart = Clock::now();
         while (endpoints.palmOutput->tryGet<dai::NNData>()) {}
-        makePalmInput(pixels.data(), width, height, palmInputBuffer);
+        // The part of the (letterboxed) square image the palm model looks at: the whole square, or one square crop
+        // of the frame per run, see Settings::searchCrops
+        float cropX = 0.0f, cropY = 0.0f, cropSize = static_cast<float>(squareSize);
+        if (settings.searchCrops && width != height) {
+            const float side = static_cast<float>(std::min(width, height));
+            const float spanX = static_cast<float>(width) - side;  // free room along the long side
+            const float spanY = static_cast<float>(height) - side;
+            const float fractions[3] = {0.5f, 0.0f, 1.0f};         // center, left (top), right (bottom)
+            result->palmCrop = searchCropCounter++ % 4;
+            if (result->palmCrop < 3) {
+                cropX = padX + spanX * fractions[result->palmCrop];
+                cropY = padY + spanY * fractions[result->palmCrop];
+                cropSize = side;
+            }
+        }
+        makePalmInput(pixels.data(), width, height, palmInputBuffer, cropX, cropY, cropSize);
         auto input = std::make_shared<dai::ImgFrame>();
         input->setType(dai::ImgFrame::Type::BGR888p);
         input->setSize(kPalmInputSize, kPalmInputSize);
@@ -280,11 +302,36 @@ std::shared_ptr<HandFrame> HandTracker::Impl::process(
         consecutiveTimeouts = 0;
         const std::vector<float> scores = inference->getLayerFp16("classificators");
         const std::vector<float> regressors = inference->getLayerFp16("regressors");
+        float bestLogit = -std::numeric_limits<float>::infinity();
+        for (const float logit : scores) bestLogit = std::max(bestLogit, logit);
+        result->palmBestScore = scores.empty() ? 0.0f : 1.0f / (1.0f + std::exp(-bestLogit));
         hands = decodePalmDetections(scores, regressors, settings.palmScoreThreshold, settings.solo);
         if (!settings.solo) {
             hands = nonMaxSuppression(std::move(hands), settings.palmNmsThreshold, static_cast<std::size_t>(settings.maxHands));
         }
-        for (HandRegion& hand : hands) palmToRoi(hand, static_cast<float>(squareSize));
+        for (HandRegion& hand : hands) palmToRoi(hand, cropSize, cropX, cropY);
+        // Do not run the landmark model again on a candidate that it rejected a moment ago at the same place, unless
+        // the palm model is clearly more sure this time
+        if (settings.rejectionMemoryMs > 0) {
+            const auto now = Clock::now();
+            const auto expiry = std::chrono::milliseconds(settings.rejectionMemoryMs);
+            rejectedCandidates.erase(
+                std::remove_if(rejectedCandidates.begin(), rejectedCandidates.end(),
+                    [&](const RejectedCandidate& r) { return now - r.time > expiry; }),
+                rejectedCandidates.end());
+            const std::size_t before = hands.size();
+            hands.erase(
+                std::remove_if(hands.begin(), hands.end(), [&](const HandRegion& hand) {
+                    for (const RejectedCandidate& r : rejectedCandidates) {
+                        const float dx = hand.rectXCenter - r.x;
+                        const float dy = hand.rectYCenter - r.y;
+                        if (std::sqrt(dx * dx + dy * dy) < 0.5f * r.size && hand.pdScore <= r.score + 0.1f) return true;
+                    }
+                    return false;
+                }),
+                hands.end());
+            result->skippedCandidates = static_cast<int>(before - hands.size());
+        }
         result->palmDetectionRan = true;
         // Only one hand is tracked, keep tracking it from its landmarks unless palm detection finds another one
         if (!settings.solo && handsInPreviousFrame == 1 && hands.size() <= 1) hands = handsFromLandmarks;
@@ -329,7 +376,15 @@ std::shared_ptr<HandFrame> HandTracker::Impl::process(
                 layer("Identity_3_dense/BiasAdd/Add"),
                 settings.landmarkScoreThreshold);
             consecutiveTimeouts = 0;
+            result->landmarkBestScore = std::max(result->landmarkBestScore, hand.lmScore);
+            if (!hand.hasLandmarks && hand.pdScore > 0.0f && settings.rejectionMemoryMs > 0) {
+                // came from palm detection, not from tracking, and is no hand: remember it
+                if (rejectedCandidates.size() >= 16) rejectedCandidates.erase(rejectedCandidates.begin());
+                rejectedCandidates.push_back({hand.rectXCenter, hand.rectYCenter, hand.rectSize, hand.pdScore, Clock::now()});
+            }
         }
+        result->firstRoi = {hands[0].rectXCenter, hands[0].rectYCenter, hands[0].rectSize,
+                            hands[0].rotation * 57.2957795f};
         landmarkMs = millisecondsSince(landmarkStart);
     }
 
@@ -445,7 +500,10 @@ void HandTracker::Impl::writeLog(const HandFrame& result, double palmMs, double 
     log << std::setprecision(6);
     log << "{\"seq\":" << result.sequence << ",\"dev\":" << std::fixed << result.deviceTimestamp << std::defaultfloat
         << ",\"latency_ms\":" << result.latencyMs << ",\"proc_ms\":" << result.processingMs
-        << ",\"palm\":" << (result.palmDetectionRan ? 1 : 0) << ",\"palm_ms\":" << palmMs
+        << ",\"palm\":" << (result.palmDetectionRan ? 1 : 0) << ",\"skipped\":" << result.skippedCandidates << ",\"palm_crop\":" << result.palmCrop << ",\"palm_best\":" << result.palmBestScore << ",\"lm_best\":" << result.landmarkBestScore
+        << ",\"roi\":[" << result.firstRoi[0] << ',' << result.firstRoi[1] << ',' << result.firstRoi[2] << ','
+        << result.firstRoi[3] << ']'
+        << ",\"palm_ms\":" << palmMs
         << ",\"lm_ms\":" << landmarkMs << ",\"hands\":[";
     for (std::size_t i = 0; i < result.hands.size(); ++i) {
         const TrackedHand& hand = result.hands[i];

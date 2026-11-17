@@ -246,6 +246,12 @@ PipelineWrapper* sai_depthai_pipeline_build(
             }
             handTracking.settings.searchIntervalMs =
                 envInt("SAI_HAND_SEARCH_INTERVAL_MS", handTracking.settings.searchIntervalMs);
+            handTracking.settings.searchCrops = envInt("SAI_HAND_SEARCH_CROPS", 1) != 0;
+            handTracking.settings.rejectionMemoryMs = envInt("SAI_HAND_REJECT_MEMORY_MS", handTracking.settings.rejectionMemoryMs);
+            if (const char* threshold = std::getenv("SAI_HAND_PALM_THRESHOLD")) {
+                // percent, for experiments: a lower threshold gives more candidates
+                handTracking.settings.palmScoreThreshold = std::max(0.05f, std::min(0.95f, static_cast<float>(std::atoi(threshold)) / 100.0f));
+            }
             handTracking.settings.throttleStartC = static_cast<float>(
                 envInt("SAI_HAND_THROTTLE_START_C", static_cast<int>(handTracking.settings.throttleStartC)));
             handTracking.settings.maxHands = std::max(1, std::min(2, configuration->handTrackingMaxHands));

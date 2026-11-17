@@ -341,8 +341,21 @@ int main(int argc, char *argv[]) {
         sai_mapper_output_release(mapperOutput); // must release memory!
     };
 
+    // Optional VIO internal parameter: area of the image that the feature tracker ignores (the projector image and the
+    // hands on the ARML), x0,y0,x1,y1 in 0..1. Same as 'trackerMasks' of the launcher settings.
+    std::vector<std::string> internalParameterStrings;
+    if (const char* masks = std::getenv("SAI_VIO_TRACKER_MASKS")) {
+        internalParameterStrings = {"trackerMasks", masks};
+    }
+    std::vector<const char*> internalParameters;
+    for (const std::string& s : internalParameterStrings) internalParameters.push_back(s.c_str());
+
     std::array<char, 1000> errorMessage{};
-    PipelineWrapper* pipeline = sai_depthai_pipeline_build(&config, nullptr, 0, onMapperOutput);
+    PipelineWrapper* pipeline = sai_depthai_pipeline_build(
+        &config, internalParameters.empty() ? nullptr : internalParameters.data(),
+        static_cast<int>(internalParameters.size() / 2),
+        // like the Unity wrapper, which has the mapping API off by default (SAI_MAPPING=1 turns it on)
+        std::getenv("SAI_MAPPING") ? onMapperOutput : nullptr);
     if (!pipeline) {
         sai_depthai_get_last_error(errorMessage.data(), static_cast<int>(errorMessage.size()));
         std::cerr << "Pipeline build failed: " << errorMessage.data() << std::endl;
